@@ -111,10 +111,12 @@ export class TaskStore {
       return this.save(task);
     });
   }
-  submit(id, key) {
-    return this.idempotent(`submit:${id}`, key, {}, () => {
+  submit(id, key, expectedRevision) {
+    if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 1)) throw new ApiError(400, 'invalid_input', 'revision must be a positive safe integer');
+    return this.idempotent(`submit:${id}`, key, expectedRevision === undefined ? {} : { revision: expectedRevision }, () => {
       const task = this.get(id);
       if (task.status !== 'draft') throw new ApiError(409, 'invalid_state', 'Only a draft can be submitted');
+      if (expectedRevision !== undefined && task.revision !== expectedRevision) throw new ApiError(409, 'revision_conflict', 'This draft changed after review. Reload and review the current revision before submitting.');
       task.status = 'pending'; task.submittedAt = this.now();
       this.event(task, 'submitted');
       return this.save(task);

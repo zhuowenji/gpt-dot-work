@@ -19,3 +19,5 @@ __pycache__/
 coverage/
 test-results/
 playwright-report/
+
+!deploy/service.env.example
