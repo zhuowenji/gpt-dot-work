@@ -32,9 +32,9 @@ with sync_playwright() as p:
     page.get_by_role('button',name='关闭',exact=True).click()
     assert not page.locator('dialog').is_visible()
     page.get_by_role('link',name='任务',exact=False).first.click()
-    page.get_by_role('button',name='添加任务',exact=True).click()
-    page.get_by_label('任务名称').fill('测试任务')
-    page.locator('#task-form').get_by_role('button',name='添加任务').click()
+    page.get_by_role('button',name='添加待办',exact=True).click()
+    page.get_by_label('待办名称').fill('测试任务')
+    page.locator('#task-form').get_by_role('button',name='添加待办').click()
     page.get_by_label('测试任务状态').select_option('已完成')
     assert page.get_by_label('测试任务状态').input_value()=='已完成'
     page.get_by_role('button',name='起草需求',exact=True).click()
@@ -42,15 +42,13 @@ with sync_playwright() as p:
     page.get_by_label('目标、交付物与允许的操作').fill('仅整理公开示例。不得运行命令。')
     page.get_by_role('button',name='保存草稿',exact=True).click()
     assert page.locator('.queue-status').last.inner_text()=='草稿'
-    page.locator('.request-row').last.click()
     page.get_by_role('button',name='确认提交（演示）',exact=True).click()
     assert page.locator('dialog').is_visible()
-    page.get_by_label('我确认提交这份需求记录，并知晓执行器未连接。').check()
+    page.get_by_label('我确认提交以上需求，知晓当前没有真实 AI 执行器。').check()
     page.get_by_role('button',name='确认提交（演示）',exact=True).click()
     assert page.locator('.queue-status').last.inner_text()=='受阻'
-    page.locator('.request-row').last.click()
-    assert page.get_by_text('提交记录已保存在本地。执行器未连接，未加入真实队列，也没有运行任何操作。').is_visible()
-    page.get_by_role('button',name='取消此请求',exact=True).click()
+    assert page.get_by_text('本地演示，不会启动实际执行。',exact=True).is_visible()
+    page.get_by_role('button',name='取消需求',exact=True).click()
     assert page.locator('.queue-status').last.inner_text()=='已取消'
     page.reload()
     assert page.locator('.queue-status').last.inner_text()=='已取消'

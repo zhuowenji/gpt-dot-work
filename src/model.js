@@ -28,13 +28,54 @@ export function searchNotes(notes, query) { const q = query.trim().toLocaleLower
 export function projectProgress(state, id) { const tasks = state.tasks.filter(t => t.projectId === id); return tasks.length ? Math.round(tasks.filter(t => t.status === '已完成').length / tasks.length * 100) : 0; }
 export function isValidState(s) {
   const stringFields=(v,fields)=>v && fields.every(k=>typeof v[k]==='string');
-  const id=v=>typeof v==='string' && /^[a-zA-Z0-9-]+$/.test(v);
+  const id=v=>typeof v==='string' && /^[a-zA-Z0-9_-]+$/.test(v);
   if(!s || s.version!==1 || !['projects','notes','tasks','decisions'].every(k=>Array.isArray(s[k])))return false;
-  const validProjects=s.projects.length>0 && s.projects.every(p=>stringFields(p,['id','name','icon','color','category','description','stage','plan'])&&id(p.id)&&['blue','orange','purple'].includes(p.color));
+  const validProjects=s.projects.every(p=>stringFields(p,['id','name','icon','color','category','description','stage','plan'])&&id(p.id)&&['blue','orange','purple'].includes(p.color));
   if(!validProjects)return false;
   const known=v=>s.projects.some(p=>p.id===v);
   return s.notes.every(n=>stringFields(n,['id','title','body','projectId','type','updated'])&&id(n.id)&&known(n.projectId)&&Array.isArray(n.tags)&&n.tags.every(t=>typeof t==='string'))
     &&s.tasks.every(t=>stringFields(t,['id','title','projectId','status','priority','due'])&&id(t.id)&&known(t.projectId)&&statuses.includes(t.status))
     &&s.decisions.every(d=>stringFields(d,['id','title','projectId','detail'])&&id(d.id)&&known(d.projectId)&&typeof d.resolved==='boolean')
     &&(s.requests===undefined || (Array.isArray(s.requests)&&s.requests.every(r=>stringFields(r,['id','title','body','status','updated'])&&id(r.id)&&['draft','pending','running','blocked','needs_approval','completed','failed','cancelled'].includes(r.status))));
+}
+
+// Private server accounts begin empty; public demo seed is opt-in by document mode.
+export function emptyState() { return {version:1,projects:[],notes:[],tasks:[],decisions:[]}; }
+
+export function createWorkspaceClient(fetcher = globalThis.fetch.bind(globalThis)) {
+  let csrfToken = null;
+  async function request(path, {method = 'GET', body, key} = {}) {
+    const headers = {Accept:'application/json'};
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+    if (method !== 'GET' && csrfToken) headers['X-CSRF-Token'] = csrfToken;
+    if (key) headers['Idempotency-Key'] = key;
+    let response;
+    try { response = await fetcher(path, {method,headers,credentials:'same-origin',cache:'no-store',...(body === undefined ? {} : {body:JSON.stringify(body)})}); }
+    catch { const error = new Error('无法连接服务器。'); error.code = 'network_error'; throw error; }
+    let data;
+    try { data = await response.json(); }
+    catch { const error = new Error('服务器返回了无法识别的响应。保存结果尚未确认。'); error.code = 'invalid_response'; error.status = response.status; throw error; }
+    if (!response.ok) { const error = new Error(data.error?.message || '服务器请求失败。'); error.status = response.status; error.code = data.error?.code; throw error; }
+    return data;
+  }
+  function workspaceEnvelope(data) {
+    if (!Number.isSafeInteger(data.revision) || data.revision < 0 || !isValidState(data.workspace) || data.workspace.requests !== undefined) {
+      const error = new Error('服务器工作空间格式不正确，未载入或确认保存。'); error.code = 'invalid_response'; throw error;
+    }
+    return data;
+  }
+  return {
+    setCsrfToken(value) { csrfToken = value; },
+    getSession: () => request('/api/session'),
+    login: password => request('/api/login', {method:'POST',body:{password}}),
+    logout: () => request('/api/logout', {method:'POST',body:{}}),
+    getWorkspace: async () => workspaceEnvelope(await request('/api/workspace')),
+    saveWorkspace: async (workspace, revision) => workspaceEnvelope(await request('/api/workspace', {method:'PUT',body:{revision,workspace}})),
+    listTasks: cursor => request('/api/tasks?limit=100' + (cursor ? '&cursor=' + encodeURIComponent(cursor) : '')),
+    getTask: id => request('/api/tasks/' + encodeURIComponent(id)),
+    getEvents: (id, after = 0) => request('/api/tasks/' + encodeURIComponent(id) + '/events?after=' + after),
+    createTask: (body, key) => request('/api/tasks', {method:'POST',body,key}),
+    editTask: (id, body, key) => request('/api/tasks/' + encodeURIComponent(id), {method:'PATCH',body,key}),
+    taskAction: (id, action, body, key) => request('/api/tasks/' + encodeURIComponent(id) + '/' + action, {method:'POST',body,key})
+  };
 }

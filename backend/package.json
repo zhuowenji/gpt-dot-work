@@ -3,12 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node service.mjs",
     "api": "node server.mjs",
     "worker": "node worker.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check config.mjs && node --check store.mjs && node --check server.mjs && node --check worker.mjs && node --check service.mjs && npm test"
+    "check": "node --check config.mjs && node --check auth.mjs && node --check workspace.mjs && node --check store.mjs && node --check server.mjs && node --check worker.mjs && node --check service.mjs && node --check password-hash.mjs && node --check revoke-sessions.mjs && npm test",
+    "password-hash": "node password-hash.mjs",
+    "revoke-sessions": "node revoke-sessions.mjs"
   }
 }

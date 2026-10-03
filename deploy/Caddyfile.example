@@ -1,0 +1,10 @@
+# Replace the reserved example domain only after domain/DNS/TLS access is approved.
+# Caddy owns HTTPS. The app stays on host loopback; do not expose port 4318 publicly.
+workspace.example.com {
+    reverse_proxy 127.0.0.1:4318
+    header {
+        Strict-Transport-Security "max-age=15552000"
+        -Server
+    }
+    # Access logging is intentionally not enabled; decide retention/redaction first.
+}

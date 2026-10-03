@@ -1,25 +1,27 @@
 import { createServer } from 'node:http';
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { readFile, realpath } from 'node:fs/promises';
+import { resolve, sep, extname } from 'node:path';
+import { OwnerAuth, constantEqual } from './auth.mjs';
+import { WorkspaceStore, MAX_WORKSPACE_BYTES } from './workspace.mjs';
 import { pathToFileURL } from 'node:url';
 import { TaskStore, ApiError, TASK_STATES } from './store.mjs';
 import { readConfig } from './config.mjs';
 
-const digest = value => createHash('sha256').update(value).digest();
 function authorized(req, expected) {
   const actual = req.headers.authorization;
-  return Boolean(expected && typeof actual === 'string' && actual.startsWith('Bearer ') && timingSafeEqual(digest(actual.slice(7)), digest(expected)));
+  return Boolean(expected && typeof actual === 'string' && actual.startsWith('Bearer ') && constantEqual(actual.slice(7), expected));
 }
 function send(res, code, data) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff' });
   res.end(JSON.stringify(data));
 }
-async function readBody(req) {
+async function readBody(req, maxBytes = 32768) {
   if (!/^application\/json(?:;|$)/i.test(req.headers['content-type'] || '')) throw new ApiError(415, 'json_required', 'Send Content-Type: application/json');
   const chunks = [];
   let length = 0;
   for await (const chunk of req) {
     length += chunk.length;
-    if (length > 32768) throw new ApiError(413, 'body_too_large', 'JSON body exceeds 32 KiB');
+    if (length > maxBytes) throw new ApiError(413, 'body_too_large', `JSON body exceeds ${maxBytes} bytes`);
     chunks.push(chunk);
   }
   let body;
@@ -38,29 +40,78 @@ function integerQuery(url, key, fallback, max) {
   return Number(raw);
 }
 
+async function serveStatic(req, res, pathname, staticDir) {
+  if (!['GET', 'HEAD'].includes(req.method) || !staticDir) throw new ApiError(404, 'not_found', 'Endpoint not found');
+  let decoded;
+  try { decoded = decodeURIComponent(pathname); } catch { throw new ApiError(400, 'invalid_path', 'Invalid URL path'); }
+  const rootPage = decoded === '/' || decoded === '/index.html';
+  if (!rootPage && !/^\/src\/[A-Za-z0-9_/-]+\.(?:js|css|svg|png|webp|ico|woff2)$/.test(decoded)) throw new ApiError(404, 'not_found', 'Asset not found');
+  try {
+    const root = await realpath(staticDir);
+    const path = await realpath(resolve(root, '.' + (rootPage ? '/index.html' : decoded)));
+    if (!path.startsWith(root + sep)) throw new ApiError(404, 'not_found', 'Asset not found');
+    let content = await readFile(path);
+    if (rootPage) content = Buffer.from(content.toString('utf8').replace(/<head(?:\s[^>]*)?>/i, '$&<meta name="workspace-mode" content="server">'));
+    const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webp': 'image/webp', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
+    res.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'Cache-Control': 'no-store', 'Content-Length': content.length });
+    res.end(req.method === 'HEAD' ? undefined : content);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError(404, 'not_found', 'Build the frontend before serving this page');
+  }
+}
+
 export function createApiServer(store, config) {
-  if (!config.apiToken || config.apiToken.length < 32) throw new Error('A strong API token is required');
+  if (!config.ownerPasswordHash && (!config.apiToken || config.apiToken.length < 32)) throw new Error('An owner password hash or strong API token is required');
   if (config.approvalToken && (config.approvalToken.length < 32 || config.approvalToken === config.apiToken)) throw new Error('The approval credential must be strong and distinct from the API credential');
+  const auth = new OwnerAuth(store, config);
+  const workspace = new WorkspaceStore(store);
   const server = createServer(async (req, res) => {
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+    res.setHeader('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
+    if (config.production) res.setHeader('Strict-Transport-Security', 'max-age=31536000');
     try {
       const origin = req.headers.origin;
-      if (origin && origin !== config.allowedOrigin) throw new ApiError(403, 'origin_denied', 'This browser origin is not allowed');
+      if (origin && origin !== (config.publicOrigin || config.allowedOrigin)) throw new ApiError(403, 'origin_denied', 'This browser origin is not allowed');
       if (origin) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Vary', 'Origin');
       }
       if (req.method === 'OPTIONS') {
         if (!origin) throw new ApiError(403, 'origin_denied', 'Preflight requires an allowed origin');
-        res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key', 'Access-Control-Max-Age': '600' });
+        res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-CSRF-Token', 'Access-Control-Max-Age': '600' });
         res.end(); return;
       }
       const url = new URL(req.url, 'http://localhost');
-      if (req.method === 'GET' && url.pathname === '/health') { send(res, 200, { ok: true }); return; }
+      if (req.method === 'GET' && url.pathname === '/health') { send(res, 200, { ok: true, ...(config.releaseId ? { releaseId: config.releaseId } : {}) }); return; }
+      if (!url.pathname.startsWith('/api/')) {
+        await serveStatic(req, res, url.pathname, config.staticDir); return;
+      }
+      const session = auth.session(req);
+      if (req.method === 'GET' && url.pathname === '/api/session') { send(res, 200, auth.describe(session)); return; }
+      if (req.method === 'POST' && url.pathname === '/api/login') {
+        auth.requireOrigin(req);
+        send(res, 200, await auth.login(req, res, await readBody(req, 2048))); return;
+      }
+      if (req.method === 'POST' && url.pathname === '/api/logout') {
+        if (!session) throw new ApiError(401, 'unauthorized', 'Sign in to continue');
+        auth.requireCsrf(req, session); emptyBody(await readBody(req));
+        send(res, 200, auth.logout(req, res, session)); return;
+      }
       const match = /^\/api\/tasks\/([a-f0-9-]{36})(?:\/(submit|cancel|retry|approval|events))?$/.exec(url.pathname);
       const approvalRoute = req.method === 'POST' && match?.[2] === 'approval';
-      if (!authorized(req, approvalRoute ? config.approvalToken : config.apiToken)) throw new ApiError(401, 'unauthorized', 'A valid bearer credential is required for this operation');
+      // Cookie sessions never grant authorization merely because request text asks.
+      // A bearer credential is for a separate machine client, not browser storage.
+      const bearer = authorized(req, approvalRoute ? config.approvalToken : config.apiToken);
+      if (!bearer && !session) throw new ApiError(401, 'unauthorized', 'Sign in or provide a valid bearer credential');
+      if (!bearer && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) auth.requireCsrf(req, session);
+      if (req.method === 'GET' && url.pathname === '/api/workspace') { send(res, 200, workspace.get()); return; }
+      if (req.method === 'PUT' && url.pathname === '/api/workspace') { send(res, 200, workspace.put(await readBody(req, MAX_WORKSPACE_BYTES + 128))); return; }
       if (req.method === 'GET' && url.pathname === '/api/status') {
-        send(res, 200, { runtime: config.runtime, demo: config.runtime === 'demo', realExecutionConfigured: false, pollMs: config.pollMs, approvalConfigured: Boolean(config.approvalToken), states: TASK_STATES }); return;
+        send(res, 200, { runtime: config.runtime, demo: config.runtime === 'demo', realExecutionConfigured: false, pollMs: config.pollMs, approvalConfigured: Boolean(config.approvalToken || config.ownerPasswordHash), states: TASK_STATES }); return;
       }
       if (req.method === 'GET' && url.pathname === '/api/tasks') {
         const limit = integerQuery(url, 'limit', 100, 500);
@@ -86,6 +137,9 @@ export function createApiServer(store, config) {
         if (action === 'approval') {
           if (Object.keys(body).some(key => !['requestId', 'decision'].includes(key))) throw new ApiError(400, 'invalid_input', 'Only requestId and decision are accepted');
           send(res, 200, { task: store.decideApproval(id, body, req.headers['idempotency-key']) });
+        } else if (action === 'submit') {
+          if (Object.keys(body).some(key => key !== 'revision') || (session && !Object.hasOwn(body, 'revision'))) throw new ApiError(400, 'invalid_input', 'Browser submission requires the exact reviewed revision');
+          send(res, 200, { task: store.submit(id, req.headers['idempotency-key'], body.revision) });
         } else {
           emptyBody(body);
           send(res, 200, { task: store[action](id, req.headers['idempotency-key']) });
@@ -94,6 +148,7 @@ export function createApiServer(store, config) {
       }
       throw new ApiError(404, 'not_found', 'Endpoint not found');
     } catch (error) {
+      if (error instanceof ApiError && error.status === 429) res.setHeader('Retry-After', '900');
       if (!res.headersSent) send(res, error instanceof ApiError ? error.status : 500, { error: { code: error instanceof ApiError ? error.code : 'internal_error', message: error instanceof ApiError ? error.message : 'The request could not be completed' } });
       else res.end();
     }
