@@ -1,0 +1,10 @@
+import { mkdir, copyFile, cp, readFile, writeFile } from 'node:fs/promises';
+await mkdir('dist', {recursive:true});
+await copyFile('index.html','dist/index.html');
+await cp('src','dist/src',{recursive:true});
+const css=await readFile('src/style.css','utf8');
+const model=(await readFile('src/model.js','utf8')).replaceAll('export ','');
+const app=(await readFile('src/app.js','utf8')).replace(/^import .*?;\n/,'');
+const html=(await readFile('index.html','utf8')).replace('<link rel="stylesheet" href="/src/style.css">',`<style>${css}</style>`).replace('<script type="module" src="/src/app.js"></script>',`<script type="module">${model}\n${app.replace(/<\/script/gi,'<\\/script')}</script>`);
+await writeFile('dist/preview.html',html);
+console.log('Built dist/ + self-contained dist/preview.html (not published).');

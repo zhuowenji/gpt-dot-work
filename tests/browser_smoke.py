@@ -1,0 +1,83 @@
+"""Optional browser QA: python tests/browser_smoke.py (requires Playwright + Chromium)."""
+from playwright.sync_api import sync_playwright
+import os, json
+out=os.environ.get('SCREENSHOT_DIR','/tmp/gpt-dot-work-review')
+os.makedirs(out,exist_ok=True)
+with sync_playwright() as p:
+    browser=p.chromium.launch(executable_path='/usr/bin/chromium',headless=True,args=['--no-sandbox'])
+    page=browser.new_page(viewport={'width':1440,'height':1100},device_scale_factor=1)
+    errors=[]
+    page.on('pageerror',lambda e:errors.append(str(e)))
+    page.goto('http://127.0.0.1:4173')
+    page.screenshot(path=out+'/desktop-overview.png',full_page=True)
+    page.get_by_role('link',name='知识库',exact=True).click()
+    page.get_by_role('textbox',name='搜索知识库').fill('慢下来')
+    assert page.locator('.note-card').count()==1
+    page.get_by_role('textbox',name='搜索知识库').fill('不存在内容')
+    assert page.get_by_text('没有找到相关笔记。试试其他关键词。').is_visible()
+    page.get_by_role('textbox',name='搜索知识库').fill('')
+    page.get_by_role('button',name='新建笔记',exact=True).click()
+    page.get_by_label('标题',exact=True).fill('浏览器测试笔记')
+    page.get_by_label('内容',exact=True).fill('<script>window.injected=true</script> 测试内容')
+    page.get_by_role('button',name='保存笔记',exact=True).click()
+    assert page.get_by_role('heading',name='浏览器测试笔记').is_visible()
+    assert not page.evaluate('Boolean(window.injected)')
+    page.reload()
+    assert page.get_by_role('heading',name='浏览器测试笔记').is_visible()
+    page.get_by_role('heading',name='浏览器测试笔记').click()
+    page.get_by_label('标题',exact=True).fill('已编辑笔记')
+    page.get_by_role('button',name='保存笔记',exact=True).click()
+    assert page.get_by_role('heading',name='已编辑笔记').is_visible()
+    page.get_by_role('button',name='新建笔记',exact=True).click()
+    page.get_by_role('button',name='关闭',exact=True).click()
+    assert not page.locator('dialog').is_visible()
+    page.get_by_role('link',name='任务',exact=False).first.click()
+    page.get_by_role('button',name='添加任务',exact=True).click()
+    page.get_by_label('任务名称').fill('测试任务')
+    page.locator('#task-form').get_by_role('button',name='添加任务').click()
+    page.get_by_label('测试任务状态').select_option('已完成')
+    assert page.get_by_label('测试任务状态').input_value()=='已完成'
+    page.get_by_role('button',name='起草需求',exact=True).click()
+    page.get_by_label('需求标题').fill('测试需求')
+    page.get_by_label('目标、交付物与允许的操作').fill('仅整理公开示例。不得运行命令。')
+    page.get_by_role('button',name='保存草稿',exact=True).click()
+    assert page.locator('.queue-status').last.inner_text()=='草稿'
+    page.locator('.request-row').last.click()
+    page.get_by_role('button',name='确认提交（演示）',exact=True).click()
+    assert page.locator('dialog').is_visible()
+    page.get_by_label('我确认提交这份需求记录，并知晓执行器未连接。').check()
+    page.get_by_role('button',name='确认提交（演示）',exact=True).click()
+    assert page.locator('.queue-status').last.inner_text()=='受阻'
+    page.locator('.request-row').last.click()
+    assert page.get_by_text('提交记录已保存在本地。执行器未连接，未加入真实队列，也没有运行任何操作。').is_visible()
+    page.get_by_role('button',name='取消此请求',exact=True).click()
+    assert page.locator('.queue-status').last.inner_text()=='已取消'
+    page.reload()
+    assert page.locator('.queue-status').last.inner_text()=='已取消'
+    with page.expect_download() as dl:
+        page.get_by_role('button',name='导出本地数据').click()
+    exported=json.load(open(dl.value.path()))
+    assert exported['requests'][-1]['status']=='cancelled'
+    # Restore fictional seeds only before review screenshots.
+    page.evaluate('localStorage.clear()')
+    page.goto('http://127.0.0.1:4173/#projects')
+    page.get_by_role('button',name='独立产品实验室',exact=False).first.click()
+    page.screenshot(path=out+'/desktop-project.png',full_page=True)
+    page.goto('http://127.0.0.1:4173/#tasks')
+    page.screenshot(path=out+'/desktop-tasks.png',full_page=True)
+    page.goto('http://127.0.0.1:4173/#knowledge')
+    page.screenshot(path=out+'/desktop-knowledge.png',full_page=True)
+    mobile=browser.new_page(viewport={'width':390,'height':844},device_scale_factor=1,is_mobile=True,has_touch=True)
+    mobile.goto('http://127.0.0.1:4173/')
+    assert mobile.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    mobile.screenshot(path=out+'/mobile-overview.png',full_page=True)
+    mobile.get_by_role('link',name='任务',exact=False).first.click()
+    assert mobile.evaluate('document.documentElement.scrollWidth <= innerWidth')
+    mobile.screenshot(path=out+'/mobile-tasks.png',full_page=True)
+    mobile.get_by_role('button',name='起草需求').click()
+    assert mobile.locator('dialog').is_visible()
+    mobile.get_by_role('button',name='关闭',exact=True).click()
+    assert not mobile.locator('dialog').is_visible()
+    assert not errors, errors
+    browser.close()
+print('PASS: desktop/mobile, search, note create/edit/reload/XSS, modal dismissal, task status, draft/consent/blocked/cancel, export, no JS errors or mobile overflow')
