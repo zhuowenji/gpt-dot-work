@@ -155,8 +155,10 @@ Set `NODE_ENV=production`, an exact HTTPS `WORKSPACE_PUBLIC_ORIGIN`, and an abso
 public static root. Production fails at startup unless the hash, HTTPS origin,
 loopback host, and built `index.html` are valid. The app listens on loopback; the
 operator's existing reverse proxy must terminate TLS, preserve `Host`, and forward
-to that listener. The app does not trust `X-Forwarded-For`, TLS forwarding headers,
-or client-supplied identity headers. Do not expose the HTTP listener directly.
+to that listener. The app never trusts `X-Forwarded-For`, TLS forwarding headers,
+or client-supplied identity headers. A dedicated client-IP header can be explicitly
+trusted for login throttling only, as described below. Do not expose the HTTP
+listener directly.
 
 `WORKSPACE_STATIC_DIR` defaults to the repository's built `dist`. Only the root
 page and allow-listed `/src/` assets are public; source config, arbitrary files,
@@ -217,14 +219,60 @@ hour by default, and are capped at ten active devices. Changing the configured
 password hash invalidates existing sessions. Optional session timeout variables
 are listed in `.env.example` and validated at startup.
 
-Login attempts are limited transactionally in SQLite to five per connection IP
-and fifty globally per 15 minutes, including successful logins. Forwarded IP
-headers are ignored, so a loopback reverse proxy normally shares one five-attempt
-bucket. This deliberately conservative protection can temporarily lock the owner
-out after public failed attempts. Use the existing reverse proxy's additional
-rate limits/access controls if needed; do not open the backend port or trust
-arbitrary proxy headers as a workaround. The limiter is bounded and survives
-restart. No plaintext passwords or request content is logged by the backend.
+Only failed password checks consume the durable login quota: five per verified
+client IP per 15 minutes. A successful password login clears that client's failure
+history. Invalid JSON/form bodies, malformed proxy headers, successful logins, and
+requests rejected before password work do not add failures. SQLite retains at most
+4096 recent client counters; old counters expire or are evicted oldest-first. No
+persistent global failure counter can lock out all clients. Upgrading removes the
+old shared global counter.
+
+Separately, at most two scrypt password checks run concurrently per API process,
+with at most one per client. Excess work is rejected immediately as
+`429 login_busy` with `Retry-After: 1`, without queueing passwords or consuming the
+failed-auth quota. A client whose five password failures exhausted its own window
+receives `429 login_rate_limited` with `Retry-After: 900`. Run a single API process
+as configured by the service template; this resource gate is process-wide, not a
+distributed limiter across multiple API replicas. A separate task worker does not
+perform password checks.
+
+The safe default is `WORKSPACE_TRUST_PROXY=` (empty): client-IP forwarding headers
+are ignored and the actual socket peer identifies the client. With a loopback
+reverse proxy this shares one bucket, so public failed attempts could temporarily
+lock out the owner behind that proxy. To separate clients, explicitly configure
+only the loopback peer actually used, for example `WORKSPACE_TRUST_PROXY=127.0.0.1`
+(or the exact comma-separated peers `127.0.0.1,::1`). CIDRs, public proxy peers,
+`true`, `*`, and hostnames are rejected. IPv4-mapped loopback sockets match the
+corresponding IPv4 peer.
+
+Enable trust only after checking the local reverse proxy **overwrites** the fixed
+`X-Workspace-Client-IP` header using its directly connected, verified client IP.
+Examples inside the existing proxy's upstream configuration:
+
+```nginx
+proxy_set_header X-Workspace-Client-IP $remote_addr;
+```
+
+```caddyfile
+header_up X-Workspace-Client-IP {http.request.remote.host}
+```
+
+Do not use an inherited `X-Forwarded-For` value, blindly trust a chain supplied by
+the browser, or enable IP rewriting from arbitrary upstream peers in the proxy.
+The backend honors this dedicated header only when the connection socket exactly
+matches a configured trusted loopback peer. It requires one plain IPv4/IPv6
+address; missing, duplicate/comma-separated, port-qualified, scoped, or malformed
+values from a trusted peer return `400 invalid_client_ip` before password work.
+Headers from untrusted peers are ignored. Equivalent IPv6 forms are canonicalized
+for one rate bucket. This header supplies rate-limit attribution, never login or
+permissions. TLS, origin, session, password and CSRF checks remain unchanged.
+
+This is resource protection, not a guarantee of availability under attack. Clients
+sharing a NAT still share a failure bucket. Sustained traffic can briefly occupy
+the two verification slots, and callers can retry after those slots free. The
+operator should apply suitable edge request limits/network access controls. Keep
+the loopback backend inaccessible externally and review the proxy's own trusted-IP
+settings. No plaintext passwords or request content is logged by the backend.
 
 The existing database now includes `owner_workspace`, `owner_sessions`, and
 `owner_login_attempts`, alongside task/request/audit tables. After restoring a

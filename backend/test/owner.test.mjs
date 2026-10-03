@@ -161,7 +161,7 @@ test('login throttle is durable, bounded and not bypassed by spoofed proxy heade
   const result = await client.request('/api/login', { method: 'POST', body: { password: PASSWORD } });
   assert.equal(result.status, 429);
   assert.equal(result.headers.get('retry-after'), '900');
-  assert.equal(client.store.db.prepare('SELECT COUNT(*) AS count FROM owner_login_attempts').get().count, 2);
+  assert.equal(client.store.db.prepare('SELECT COUNT(*) AS count FROM owner_login_attempts').get().count, 1);
   const second = new TaskStore(client.config.dbPath);
   const auth = new OwnerAuth(second, client.config);
   assert.throws(() => auth.checkRate({ socket: { remoteAddress: '127.0.0.1' } }), { code: 'login_rate_limited' });
@@ -270,4 +270,93 @@ test('browser submission atomically binds authorization to the exact reviewed dr
   const changedReplay = await request(`/api/tasks/${id}/submit`, { method: 'POST', body: { revision: reviewedRevision }, headers: { 'Idempotency-Key': key } });
   assert.equal(changedReplay.status, 409);
   assert.equal(changedReplay.data.error.code, 'idempotency_conflict');
+});
+
+
+test('successful logins never spend failure quota, invalid bodies do not count, and a success clears client failures', async t => {
+  const client = await api(t);
+  for (const body of [{}, { password: '' }, { password: 4 }, { password: 'wrong', extra: true }, { password: 'x'.repeat(1025) }]) assert.equal((await client.request('/api/login', { method: 'POST', body })).status, 400);
+  assert.equal(client.store.db.prepare('SELECT COUNT(*) AS count FROM owner_login_attempts').get().count, 0);
+  for (let i = 0; i < 6; i += 1) await client.login();
+  assert.equal(client.store.db.prepare('SELECT COUNT(*) AS count FROM owner_login_attempts').get().count, 0);
+  for (let i = 0; i < 4; i += 1) assert.equal((await client.request('/api/login', { method: 'POST', body: { password: 'wrong' } })).status, 401);
+  assert.equal(client.store.db.prepare('SELECT attempts FROM owner_login_attempts').get().attempts, 4);
+  await client.login();
+  assert.equal(client.store.db.prepare('SELECT COUNT(*) AS count FROM owner_login_attempts').get().count, 0);
+  assert.equal((await client.request('/api/login', { method: 'POST', body: { password: 'wrong' } })).status, 401);
+  assert.equal(client.store.db.prepare('SELECT attempts FROM owner_login_attempts').get().attempts, 1);
+});
+
+test('trusted proxy configuration accepts exact loopback peers only and ignores spoofed headers from other peers', t => {
+  const { store, config, env } = setup(t);
+  for (const value of ['true', '*', 'localhost', '127.0.0.0/8', '0.0.0.0/0', '192.0.2.1', '127.0.0.1,', '::1,127.0.0.1,::1']) assert.throws(() => readConfig({ ...env, WORKSPACE_TRUST_PROXY: value }), /TRUST_PROXY/);
+  const auth = new OwnerAuth(store, readConfig({ ...env, WORKSPACE_TRUST_PROXY: '127.0.0.1,::1' }));
+  const req = (peer, value, xff = '198.51.100.99') => ({ socket: { remoteAddress: peer }, headers: { 'x-workspace-client-ip': value, 'x-forwarded-for': xff } });
+  assert.equal(auth.clientAddress(req('127.0.0.1', '203.0.113.7')), '203.0.113.7');
+  assert.equal(auth.clientAddress(req('::ffff:127.0.0.1', '203.0.113.7')), '203.0.113.7');
+  assert.equal(auth.clientAddress(req('::1', '2001:0db8:0000:0000:0000:0000:0000:0001')), '2001:db8::1');
+  assert.equal(auth.clientAddress(req('::1', '::ffff:203.0.113.7')), '203.0.113.7');
+  assert.equal(auth.clientAddress(req('192.0.2.9', '203.0.113.7')), '192.0.2.9');
+  assert.equal(auth.clientAddress(req('192.0.2.9', 'invalid spoofed header')), '192.0.2.9');
+  const defaultAuth = new OwnerAuth(store, config);
+  assert.equal(defaultAuth.clientAddress(req('127.0.0.1', '203.0.113.7')), '127.0.0.1');
+  for (const value of [undefined, '', '203.0.113.7, 198.51.100.9', ['203.0.113.7'], 'unknown', '203.0.113.7:443', '[::1]', 'fe80::1%eth0', ' 203.0.113.7', '203.0.113.7 ']) assert.throws(() => auth.clientAddress(req('127.0.0.1', value)), { code: 'invalid_client_ip' });
+  assert.throws(() => auth.clientAddress({ socket: { remoteAddress: '127.0.0.1' }, headers: { 'x-forwarded-for': '203.0.113.7' } }), { code: 'invalid_client_ip' });
+});
+
+test('trusted clients have separate failed-password quotas and malformed proxy input cannot trigger password work', async t => {
+  const client = await api(t, { WORKSPACE_TRUST_PROXY: '127.0.0.1' });
+  const headersA = { 'X-Workspace-Client-IP': '203.0.113.7' };
+  const headersB = { 'X-Workspace-Client-IP': '203.0.113.8' };
+  for (const headers of [{}, { 'X-Workspace-Client-IP': '203.0.113.7, 203.0.113.8' }, { 'X-Workspace-Client-IP': 'invalid' }]) assert.equal((await client.request('/api/login', { method: 'POST', body: { password: PASSWORD }, headers })).status, 400);
+  assert.equal(client.store.db.prepare('SELECT COUNT(*) AS count FROM owner_login_attempts').get().count, 0);
+  for (let i = 0; i < 5; i += 1) assert.equal((await client.request('/api/login', { method: 'POST', body: { password: 'wrong' }, headers: headersA })).status, 401);
+  assert.equal((await client.request('/api/login', { method: 'POST', body: { password: PASSWORD }, headers: headersA })).status, 429);
+  assert.equal((await client.request('/api/login', { method: 'POST', body: { password: PASSWORD }, headers: headersB })).status, 200);
+  assert.equal(client.store.db.prepare("SELECT COUNT(*) AS count FROM owner_login_attempts WHERE bucket = 'global'").get().count, 0);
+});
+
+test('password work is bounded to two checks per process and one per client without queueing or counting shed work', async t => {
+  const { store, config } = setup(t, { WORKSPACE_TRUST_PROXY: '127.0.0.1' });
+  const firstAuth = new OwnerAuth(store, config), secondAuth = new OwnerAuth(store, config);
+  const releases = [];
+  let active = 0, maximum = 0;
+  const verify = async () => {
+    active += 1; maximum = Math.max(maximum, active);
+    await new Promise(resolve => releases.push(resolve));
+    active -= 1;
+    return true;
+  };
+  t.mock.method(firstAuth, 'verifyPassword', verify);
+  t.mock.method(secondAuth, 'verifyPassword', verify);
+  const req = client => ({ socket: { remoteAddress: '127.0.0.1' }, headers: { origin: ORIGIN, 'x-workspace-client-ip': client } });
+  const res = { setHeader() {} };
+  const first = firstAuth.login(req('203.0.113.1'), res, { password: PASSWORD });
+  await assert.rejects(secondAuth.login(req('203.0.113.1'), res, { password: PASSWORD }), { code: 'login_busy' });
+  const second = secondAuth.login(req('203.0.113.2'), res, { password: PASSWORD });
+  await assert.rejects(firstAuth.login(req('203.0.113.3'), res, { password: PASSWORD }), { code: 'login_busy' });
+  assert.equal(releases.length, 2);
+  assert.equal(maximum, 2);
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM owner_login_attempts').get().count, 0);
+  for (const release of releases.splice(0)) release();
+  await Promise.all([first, second]);
+  const next = firstAuth.login(req('203.0.113.3'), res, { password: PASSWORD });
+  assert.equal(releases.length, 1);
+  releases.pop()();
+  assert.equal((await next).authenticated, true);
+  assert.equal(active, 0);
+});
+
+test('failed-client history is bounded and old global lockout state is discarded', t => {
+  const { store, config } = setup(t);
+  const auth = new OwnerAuth(store, config);
+  store.transaction(() => {
+    const insert = store.db.prepare('INSERT INTO owner_login_attempts(bucket, started_at, attempts) VALUES (?, ?, ?)');
+    for (let i = 0; i < 4100; i += 1) insert.run(`ip:fixture-${i}`, store.now(), 1);
+    insert.run('global', store.now(), 50);
+  });
+  new OwnerAuth(store, config);
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM owner_login_attempts WHERE bucket = 'global'").get().count, 0);
+  auth.recordFailure('203.0.113.9');
+  assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM owner_login_attempts').get().count, 4096);
 });

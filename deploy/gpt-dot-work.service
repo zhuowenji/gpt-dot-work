@@ -9,7 +9,9 @@ Group=gpt-dot-work
 WorkingDirectory=/srv/gpt-dot-work/current
 Environment=NODE_ENV=production
 EnvironmentFile=/etc/gpt-dot-work/service.env
-ExecStart=/usr/bin/node /srv/gpt-dot-work/current/backend/service.mjs
+# Replace /opt/node24/bin/node with the verified ISOLATED Node24 absolute path.
+# Do not replace an existing app's global /usr/bin/node (which may be Node20).
+ExecStart=/opt/node24/bin/node /srv/gpt-dot-work/current/backend/service.mjs
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30

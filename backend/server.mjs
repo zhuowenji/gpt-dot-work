@@ -148,7 +148,7 @@ export function createApiServer(store, config) {
       }
       throw new ApiError(404, 'not_found', 'Endpoint not found');
     } catch (error) {
-      if (error instanceof ApiError && error.status === 429) res.setHeader('Retry-After', '900');
+      if (error instanceof ApiError && error.status === 429) res.setHeader('Retry-After', error.code === 'login_busy' ? '1' : '900');
       if (!res.headersSent) send(res, error instanceof ApiError ? error.status : 500, { error: { code: error instanceof ApiError ? error.code : 'internal_error', message: error instanceof ApiError ? error.message : 'The request could not be completed' } });
       else res.end();
     }

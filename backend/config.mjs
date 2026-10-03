@@ -2,7 +2,7 @@ import { homedir } from 'node:os';
 import { join, isAbsolute, resolve, dirname, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { parsePasswordHash } from './auth.mjs';
+import { parsePasswordHash, parseTrustedProxies } from './auth.mjs';
 
 const repository = resolve(fileURLToPath(new URL('..', import.meta.url)));
 function integer(env, name, fallback, minimum, maximum) {
@@ -25,6 +25,7 @@ function resolvedPath(path) {
 
 export function readConfig(env = process.env, { requireApiToken = true } = {}) {
   const production = env.NODE_ENV === 'production';
+  const trustedProxyIPs = parseTrustedProxies(env.WORKSPACE_TRUST_PROXY || '');
   const releaseId = env.WORKSPACE_RELEASE || '';
   if (releaseId && !/^[A-Za-z0-9._-]{1,64}$/.test(releaseId)) throw new Error('WORKSPACE_RELEASE must contain 1–64 safe release identifier characters');
   const apiToken = env.WORKSPACE_API_TOKEN || '';
@@ -68,7 +69,7 @@ export function readConfig(env = process.env, { requireApiToken = true } = {}) {
   if (sessionIdleMs > sessionTtlMs) throw new Error('Session idle timeout cannot exceed absolute session lifetime');
   return {
     apiToken, approvalToken, runtime, dbPath, allowedOrigin, publicOrigin, production, releaseId,
-    ownerPasswordHash, ownerName, staticDir, sessionTtlMs, sessionIdleMs,
+    ownerPasswordHash, ownerName, staticDir, sessionTtlMs, sessionIdleMs, trustedProxyIPs,
     host,
     port: integer(env, 'WORKSPACE_PORT', 4318, 0, 65535),
     pollMs: integer(env, 'WORKSPACE_POLL_MS', 60000, 1000, 86400000),
