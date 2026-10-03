@@ -1,8 +1,11 @@
 import { createServer } from 'node:http';
+import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { resolve, sep, extname } from 'node:path';
 import { OwnerAuth, constantEqual } from './auth.mjs';
 import { WorkspaceStore, MAX_WORKSPACE_BYTES } from './workspace.mjs';
+import { VideoStore } from './videos.mjs';
+import { ChatIntake } from './chat.mjs';
 import { pathToFileURL } from 'node:url';
 import { TaskStore, ApiError, TASK_STATES } from './store.mjs';
 import { readConfig } from './config.mjs';
@@ -40,18 +43,38 @@ function integerQuery(url, key, fallback, max) {
   return Number(raw);
 }
 
-async function serveStatic(req, res, pathname, staticDir) {
+async function serveStatic(req, res, pathname, staticDir, publicOrigin) {
   if (!['GET', 'HEAD'].includes(req.method) || !staticDir) throw new ApiError(404, 'not_found', 'Endpoint not found');
   let decoded;
   try { decoded = decodeURIComponent(pathname); } catch { throw new ApiError(400, 'invalid_path', 'Invalid URL path'); }
   const rootPage = decoded === '/' || decoded === '/index.html';
-  if (!rootPage && !/^\/src\/[A-Za-z0-9_/-]+\.(?:js|css|svg|png|webp|ico|woff2)$/.test(decoded)) throw new ApiError(404, 'not_found', 'Asset not found');
+  const adminPage = decoded === '/admin/' || decoded === '/admin';
+  const inboxPage = decoded === '/admin/chat/' || decoded === '/admin/chat';
+  const demoPage = decoded === '/demo/' || decoded === '/demo';
+  const explicitAsset = ['/app.js', '/style.css', '/admin/chat/app.js'].includes(decoded);
+  if (!rootPage && !adminPage && !inboxPage && !demoPage && !explicitAsset && !/^\/src\/[A-Za-z0-9_/-]+\.(?:js|css|svg|png|webp|ico|woff2)$/.test(decoded)) throw new ApiError(404, 'not_found', 'Asset not found');
   try {
     const root = await realpath(staticDir);
-    const path = await realpath(resolve(root, '.' + (rootPage ? '/index.html' : decoded)));
+    const path = await realpath(resolve(root, '.' + (rootPage ? '/index.html' : adminPage ? '/admin/index.html' : inboxPage ? '/admin/chat/index.html' : demoPage ? '/demo/index.html' : decoded)));
     if (!path.startsWith(root + sep)) throw new ApiError(404, 'not_found', 'Asset not found');
     let content = await readFile(path);
-    if (rootPage) content = Buffer.from(content.toString('utf8').replace(/<head(?:\s[^>]*)?>/i, '$&<meta name="workspace-mode" content="server">'));
+    if (adminPage || inboxPage) res.setHeader('X-Robots-Tag', 'noindex');
+    if (rootPage) {
+      // Preserve uploaded HTML exactly while allowing its fixed theme bootstrap.
+      const scripts = [...content.toString('utf8').matchAll(/<script>([\s\S]*?)<\/script>/g)];
+      const hashes = scripts.map(script => ` 'sha256-${createHash('sha256').update(script[1]).digest('base64')}'`).join('');
+      res.setHeader('Content-Security-Policy', `default-src 'self'; script-src 'self'${hashes}; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; worker-src 'none'`);
+    }
+    if (demoPage) {
+      // Fixed self-contained, read-only public page. Never inject owner session state.
+      // Only the explicitly public results endpoint may be contacted.
+      const scripts = [...content.toString('utf8').matchAll(/<script type="module">([\s\S]*?)<\/script>/g)];
+      if (scripts.length !== 1) throw new ApiError(404, 'not_found', 'Build the public demo before serving this page');
+      const hash = createHash('sha256').update(scripts[0][1]).digest('base64');
+      const connectSource = publicOrigin ? `${publicOrigin}/api/public/videos` : "'self'";
+      res.setHeader('Content-Security-Policy', `default-src 'none'; script-src 'sha256-${hash}'; style-src 'unsafe-inline'; img-src data:; connect-src ${connectSource}; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; frame-src 'none'`);
+      res.setHeader('X-Robots-Tag', 'noindex');
+    }
     const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.webp': 'image/webp', '.ico': 'image/x-icon', '.woff2': 'font/woff2' };
     res.writeHead(200, { 'Content-Type': types[extname(path)] || 'application/octet-stream', 'Cache-Control': 'no-store', 'Content-Length': content.length });
     res.end(req.method === 'HEAD' ? undefined : content);
@@ -66,6 +89,8 @@ export function createApiServer(store, config) {
   if (config.approvalToken && (config.approvalToken.length < 32 || config.approvalToken === config.apiToken)) throw new Error('The approval credential must be strong and distinct from the API credential');
   const auth = new OwnerAuth(store, config);
   const workspace = new WorkspaceStore(store);
+  const videos = new VideoStore(store);
+  const chat = new ChatIntake(store, config, auth);
   const server = createServer(async (req, res) => {
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
@@ -82,15 +107,22 @@ export function createApiServer(store, config) {
       }
       if (req.method === 'OPTIONS') {
         if (!origin) throw new ApiError(403, 'origin_denied', 'Preflight requires an allowed origin');
-        res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-CSRF-Token', 'Access-Control-Max-Age': '600' });
+        res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS', 'Access-Control-Allow-Headers': 'Authorization, Content-Type, Idempotency-Key, X-Idempotency-Key, X-CSRF-Token', 'Access-Control-Max-Age': '600' });
         res.end(); return;
       }
       const url = new URL(req.url, 'http://localhost');
       if (req.method === 'GET' && url.pathname === '/health') { send(res, 200, { ok: true, ...(config.releaseId ? { releaseId: config.releaseId } : {}) }); return; }
       if (!url.pathname.startsWith('/api/')) {
-        await serveStatic(req, res, url.pathname, config.staticDir); return;
+        await serveStatic(req, res, url.pathname, config.staticDir, config.publicOrigin || config.allowedOrigin); return;
+      }
+      // Public access is limited to this explicit read-only, allowlisted DTO.
+      if (req.method === 'GET' && url.pathname === '/api/public/videos') {
+        const limit = integerQuery(url, 'limit', 50, 100);
+        if (limit < 1) throw new ApiError(400, 'invalid_query', 'limit must be at least 1');
+        send(res, 200, videos.publicList({ limit })); return;
       }
       const session = auth.session(req);
+      if (await chat.handle(req, res, url, session)) return;
       if (req.method === 'GET' && url.pathname === '/api/session') { send(res, 200, auth.describe(session)); return; }
       if (req.method === 'POST' && url.pathname === '/api/login') {
         auth.requireOrigin(req);
@@ -108,6 +140,21 @@ export function createApiServer(store, config) {
       const bearer = authorized(req, approvalRoute ? config.approvalToken : config.apiToken);
       if (!bearer && !session) throw new ApiError(401, 'unauthorized', 'Sign in or provide a valid bearer credential');
       if (!bearer && !['GET', 'HEAD', 'OPTIONS'].includes(req.method)) auth.requireCsrf(req, session);
+      if (req.method === 'GET' && url.pathname === '/api/video-settings') { send(res, 200, videos.settings()); return; }
+      if (req.method === 'PUT' && url.pathname === '/api/video-settings') { send(res, 200, videos.putSettings(await readBody(req))); return; }
+      if (req.method === 'POST' && url.pathname === '/api/videos/ingest') { send(res, 200, videos.ingest(await readBody(req, 1024 * 1024), req.headers['idempotency-key'])); return; }
+      if (req.method === 'GET' && url.pathname === '/api/videos') {
+        const limit = integerQuery(url, 'limit', 50, 200);
+        if (limit < 1) throw new ApiError(400, 'invalid_query', 'limit must be at least 1');
+        const rawCursor = url.searchParams.get('cursor');
+        const cursorMatch = rawCursor === null ? null : /^(\d+):([a-f0-9-]{36})$/.exec(rawCursor);
+        if (rawCursor !== null && (!cursorMatch || !Number.isSafeInteger(Number(cursorMatch[1])))) throw new ApiError(400, 'invalid_query', 'Invalid cursor');
+        send(res, 200, videos.list({ view: url.searchParams.get('view') || 'all', limit, cursor: cursorMatch ? { firstSeenAt: Number(cursorMatch[1]), id: cursorMatch[2] } : null })); return;
+      }
+      const videoMatch = /^\/api\/videos\/([a-f0-9-]{36})(?:\/(verification|publication))?$/.exec(url.pathname);
+      if (videoMatch && req.method === 'GET' && !videoMatch[2]) { send(res, 200, videos.get(videoMatch[1])); return; }
+      if (videoMatch && req.method === 'PATCH' && videoMatch[2] === 'publication') { send(res, 200, videos.publish(videoMatch[1], await readBody(req), req.headers['idempotency-key'], bearer ? 'owner_api' : 'owner_session')); return; }
+      if (videoMatch && req.method === 'PATCH' && videoMatch[2] === 'verification') { send(res, 200, videos.verify(videoMatch[1], await readBody(req), req.headers['idempotency-key'], bearer ? 'owner_api' : 'owner_session')); return; }
       if (req.method === 'GET' && url.pathname === '/api/workspace') { send(res, 200, workspace.get()); return; }
       if (req.method === 'PUT' && url.pathname === '/api/workspace') { send(res, 200, workspace.put(await readBody(req, MAX_WORKSPACE_BYTES + 128))); return; }
       if (req.method === 'GET' && url.pathname === '/api/status') {

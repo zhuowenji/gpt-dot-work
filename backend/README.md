@@ -1,3 +1,5 @@
+> 当前默认界面已调整：公开 `/` 接收文字问题与需求，注册/登录可选；`/admin/` 是有权限的记录、摘要、分类与回复页面，不再提供新任务发布。普通账号只能访问自己的记录，所有者独立认证。新问答 API 使用 `/api/chat/*`，与本文保留的历史私有任务 API 分开。真实 dot 连接仍未完成接入验证；详见 [问答记录模块](../docs/CHAT_INTAKE.md)。本文旧工作空间/单用户段落仅描述历史模块，不能作为新公开界面的完整权限说明。
+
 # GPT-DOT-WORK backend + worker
 
 Independent, unofficial prototype. Not affiliated with or endorsed by OpenAI. Requires Node.js 24 or newer; no third-party packages or installation step.

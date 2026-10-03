@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8fa">
+  <title>任务聊天</title>
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('task-chat-theme')==='dark'?'dark':'light'}catch{document.documentElement.dataset.theme='light'}</script>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span class="mark">✦</span><span>任务聊天</span></div>
+      <button id="newTask" class="new-task">＋ 新建任务</button>
+      <div class="side-label">我的任务</div>
+      <nav id="taskList" aria-label="任务列表"></nav>
+      <div class="identity">当前电脑 IP <strong id="myIp">读取中</strong></div>
+    </aside>
+    <main class="main">
+      <header class="topbar"><div><strong id="chatTitle">新任务</strong><small id="chatStatus">输入需求即可开始</small></div><div class="theme-switch" role="group" aria-label="页面主题"><button type="button" data-theme-choice="light" aria-label="白天模式">☀ <span>白天</span></button><button type="button" data-theme-choice="dark" aria-label="黑夜模式">☾ <span>黑夜</span></button></div></header>
+      <div id="messages" class="messages"><div class="welcome"><div class="welcome-mark">✦</div><h1>今天想让 Agent 做什么？</h1><p>把需求写清楚，任务会自动进入队列。</p></div></div>
+      <div class="composer-wrap"><div id="queuedMessages" class="queued-messages" hidden></div><form id="composer">
+        <div id="editNotice" class="edit-notice" hidden>正在编辑待领取需求 <button type="button" id="cancelEdit">取消</button></div>
+        <div id="attachmentList" class="attachments" hidden></div>
+        <div class="composer-row">
+          <textarea id="input" rows="2" placeholder="输入任务需求，或拖入文件…" aria-label="任务需求"></textarea>
+        </div>
+        <div class="composer-toolbar">
+          <button type="button" id="attach" class="attach-button" aria-label="添加附件" title="上传图片、视频或其他文件">📎</button>
+          <div class="agent-picker"><select id="agentSelect" hidden aria-label="选择员工"><option value="">随机分配</option></select><button type="button" id="agentChoice" class="agent-choice" aria-haspopup="listbox" aria-expanded="false" aria-controls="agentMenu"><span id="agentChoiceLabel" class="agent-choice-label">随机分配</span></button><div id="agentMenu" class="agent-menu" role="listbox" aria-label="选择员工" hidden></div></div>
+          <button type="submit" id="send" aria-label="发送任务"><svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="currentColor" d="M6 4 21 12 6 20l2-7 7-1-7-1-2-7Z"/></svg></button>
+        </div>
+        <input id="fileInput" type="file" multiple hidden>
+        <div id="dropHint" class="drop-hint" aria-hidden="true">松开即可添加文件、图片或视频</div>
+      </form><p id="hint">可拖入图片、视频或其他文件 · Enter 发送</p></div>
+    </main>
+  </div>
+  <dialog id="deleteTaskDialog" class="delete-task-dialog" aria-labelledby="deleteTaskTitle" aria-describedby="deleteTaskMessage">
+    <form id="deleteTaskForm">
+      <h2 id="deleteTaskTitle">删除任务？</h2>
+      <p id="deleteTaskMessage"></p>
+      <p id="deleteTaskError" class="delete-task-error" role="alert"></p>
+      <div class="delete-task-actions"><button type="button" id="cancelDeleteTask">取消</button><button type="submit" id="confirmDeleteTask">删除</button></div>
+    </form>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>

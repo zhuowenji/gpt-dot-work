@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>对话记录</title>
+  <style>
+    :root{font-family:system-ui,"Microsoft YaHei",sans-serif;color:#202532;background:#f7f8fa}*{box-sizing:border-box}body{margin:0}main{max-width:1100px;margin:auto;padding:24px}header{display:flex;gap:16px;align-items:center;flex-wrap:wrap}h1{font-size:24px;margin:0 auto 0 0}h2{font-size:19px}a{color:#4452b5}button,input,textarea{font:inherit}button{cursor:pointer;padding:7px 12px;border:1px solid #c9cede;border-radius:7px;background:#fff;color:#303a65}button:disabled{cursor:default;opacity:.55}input,textarea{width:100%;padding:9px;border:1px solid #c9cede;border-radius:7px;background:#fff;color:inherit}label{display:block;margin:12px 0}textarea{min-height:90px;resize:vertical}.panel{margin-top:20px;padding:20px;border:1px solid #dce0eb;border-radius:10px;background:#fff}.muted{color:#606a80;font-size:14px;line-height:1.6}#notice{min-height:24px;color:#a34035}table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:11px;text-align:left;border-bottom:1px solid #e4e7ef;overflow-wrap:anywhere}th{white-space:nowrap}td:first-child{max-width:280px}td:nth-child(4){max-width:340px}.table-wrap{overflow-x:auto}.message{white-space:pre-wrap;overflow-wrap:anywhere;border-bottom:1px solid #e5e7ef;padding:12px 0}.message strong{display:block;margin-bottom:6px;font-size:13px}.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.row label{flex:1;min-width:160px}#ownerLogin{max-width:430px}[hidden]{display:none!important}@media(max-width:600px){main{padding:16px}.panel{padding:14px}}
+  </style>
+</head>
+<body>
+<main>
+  <header><h1>对话记录</h1><a href="/">返回提问页面</a><span id="identity" class="muted">验证身份中…</span><button id="logout" type="button" hidden>退出登录</button></header>
+  <p class="muted">这里只查看对话、整理分类和摘要。所有新问题或指令请在首页提交。执行连接器尚未配置，不会自动执行。</p>
+  <p id="notice" role="status" aria-live="polite"></p>
+  <section id="loginPanel" class="panel" hidden>
+    <h2>需要登录</h2>
+    <p>普通用户请在<a href="/">首页底部登录或注册</a>，以查看自己的记录。访客也可直接在首页提问。</p>
+    <details><summary>网站所有者入口</summary>
+      <form id="ownerLogin"><label>所有者密码<input id="ownerPassword" type="password" autocomplete="current-password" required></label><button type="submit">登录管理记录</button></form>
+    </details>
+  </section>
+  <section id="recordsPanel" class="panel" hidden>
+    <div class="row"><label>本页分类筛选<input id="categoryFilter" type="search" placeholder="全部分类"></label><button id="refresh" type="button">刷新记录</button></div>
+    <p id="recordsDescription" class="muted"></p>
+    <div class="table-wrap"><table><thead><tr><th>对话</th><th>提交者</th><th>分类</th><th>摘要</th><th>接收状态</th></tr></thead><tbody id="records"></tbody></table></div>
+    <p id="empty" class="muted" hidden>暂无符合条件的记录。</p>
+    <div class="row"><button id="previousPage" type="button" disabled>上一页</button><span id="pageStatus" class="muted"></span><button id="nextPage" type="button" disabled>下一页</button></div>
+  </section>
+  <section id="detailPanel" class="panel" hidden>
+    <div class="row"><h2 id="detailTitle"></h2><button id="closeDetail" type="button">关闭详情</button></div>
+    <div id="threadMessages"></div>
+    <form id="metadataForm">
+      <label>分类<input id="category" maxlength="80" placeholder="未分类"></label>
+      <label>对话摘要<textarea id="summary" maxlength="4000" placeholder="尚未整理"></textarea></label>
+      <p class="muted">分类和摘要是手工保存的记录，不会自动生成知识或触发执行。</p>
+      <button id="saveMetadata" type="submit">保存整理记录</button>
+    </form>
+    <form id="replyForm" hidden><label>回复这条访客问题<textarea id="reply" maxlength="8000" required></textarea></label><p class="muted">发送后，提交此问题的访客或用户可以在原对话中看到这条回复。</p><button id="sendReply" type="submit">发送回复</button></form>
+  </section>
+</main>
+<script src="/admin/chat/app.js" defer></script>
+</body>
+</html>

@@ -16,4 +16,8 @@
 
 记录名称、固定版本、官方来源、SPDX 许可标识、是否随产物分发、版权声明/NOTICE 要求和源码提供义务。保留要求的完整文本；不确定的兼容性或权利归属应在发布前解决。
 
-项目许可尚未选择，参见 [许可与发布门槛](docs/OPEN_SOURCE_RELEASE.md)。
+项目自身采用 [MIT 许可证](LICENSE)，Copyright (c) 2026 zhuowenji。第三方各自的许可与 NOTICE 要求不受影响，参见 [发布门槛](docs/OPEN_SOURCE_RELEASE.md)。
+
+## 本次任务聊天页面
+
+仅纳入所提供页面的根 HTML、CSS 和经安全适配的原生 JavaScript。上传包中的 React office 源码、编译 bundle、工具目录及 LAN Agent 接入说明未纳入本项目发布内容；没有再分发 React office bundle。页面来源由项目所有者提供，仍需维护者对其分发权负责。

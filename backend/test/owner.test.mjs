@@ -22,6 +22,8 @@ function setup(t, overrides = {}, options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'owner-tests-'));
   const staticDir = join(dir, 'dist');
   mkdirSync(join(staticDir, 'src'), { recursive: true });
+  mkdirSync(join(staticDir, 'admin'), { recursive: true });
+  writeFileSync(join(staticDir, 'admin', 'index.html'), '<!doctype html><html><head><title>Workspace</title></head><body><script src="/src/app.js"></script></body></html>');
   writeFileSync(join(staticDir, 'index.html'), '<!doctype html><html><head><title>Workspace</title></head><body><script src="/src/app.js"></script></body></html>');
   writeFileSync(join(staticDir, 'src', 'app.js'), 'console.log("public code only");');
   const env = { WORKSPACE_OWNER_PASSWORD_HASH: encoded, WORKSPACE_PUBLIC_ORIGIN: ORIGIN, WORKSPACE_STATIC_DIR: staticDir, WORKSPACE_DB_PATH: join(dir, 'state.sqlite'), WORKSPACE_PORT: '0', ...overrides };
@@ -75,9 +77,9 @@ test('owner configuration validates hashes, production HTTPS/static readiness, a
 test('anonymous users see only public static/session/health; private API is protected and secrets never returned', async t => {
   const { request } = await api(t, { WORKSPACE_RELEASE: 'revision-test' });
   assert.deepEqual((await request('/health')).data, { ok: true, releaseId: 'revision-test' });
-  const page = await request('/');
+  const page = await request('/admin/');
   assert.equal(page.status, 200);
-  assert.match(page.data, /<meta name="workspace-mode" content="server">/);
+  assert.match(page.data, /<title>Workspace<\/title>/);
   assert.match(page.headers.get('content-security-policy'), /frame-ancestors 'none'/);
   assert.equal((await request('/src/app.js')).status, 200);
   for (const path of ['/backend/.env', '/.git/config', '/src/../../backend/config.mjs', '/preview.html', '/src/app.js%00']) assert.notEqual((await request(path)).status, 200);
@@ -390,4 +392,18 @@ test('failed-client history is bounded and old global lockout state is discarded
   assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM owner_login_attempts WHERE bucket = 'global'").get().count, 0);
   auth.recordFailure('203.0.113.9');
   assert.equal(store.db.prepare('SELECT COUNT(*) AS count FROM owner_login_attempts').get().count, 4096);
+});
+
+test('video results/settings inherit owner session and CSRF protections', async t => {
+  const { request, login } = await api(t);
+  for (const path of ['/api/videos', '/api/video-settings']) assert.equal((await request(path)).status, 401);
+  await login();
+  const settings = (await request('/api/video-settings')).data;
+  assert.equal(settings.runtime.collectorConnected, false);
+  const body = { revision: settings.revision, criteria: settings.criteria, schedule: settings.schedule };
+  assert.equal((await request('/api/video-settings', { method: 'PUT', body, useCsrf: false })).status, 403);
+  assert.equal((await request('/api/video-settings', { method: 'PUT', body, origin: 'https://evil.test' })).status, 403);
+  assert.equal((await request('/api/video-settings', { method: 'PUT', body })).status, 200);
+  assert.equal((await request('/api/videos')).data.total, 0);
+  assert.equal((await request('/api/videos/00000000-0000-0000-0000-000000000000/publication', { method: 'PATCH', body: { revision: 1, isPublic: true }, useCsrf: false })).status, 403);
 });

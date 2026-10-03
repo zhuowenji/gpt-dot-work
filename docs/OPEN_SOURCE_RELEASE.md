@@ -2,16 +2,11 @@
 
 检查日期：2026-10-03。当前仅准备本地源码；没有创建公共仓库、推送或部署。此清单不是法律意见或完整安全审计。项目为独立原型，非 OpenAI 官方项目，名称不表示 OpenAI 的关联、认可或背书。
 
-## 先决定许可证
+## 已选择 MIT 许可证
 
-尚未添加 LICENSE；package.json 中如有 UNLICENSED，是待决状态标记，不是开源许可证；不能把当前原型宣传为已正式开源授权。维护者应确认代码/素材权利、版权主体与贡献许可后选择：
+项目所有者已明确同意采用 MIT。根目录 LICENSE 包含标准完整文本，Copyright (c) 2026 zhuowenji；根目录与 backend/package.json 使用 SPDX 标识 MIT。分发时保留版权与许可声明，第三方各自的许可义务不变。private: true 继续防止误发 npm，不影响源码的 MIT 授权。
 
-- **MIT**：简洁宽松，允许广泛使用和修改；分发时保留版权和许可声明。适合希望低门槛复用的项目。[官方文本](https://opensource.org/license/mit)
-- **Apache-2.0**：宽松许可并有明确的贡献者专利授权及相关终止条件；需遵守许可、修改声明和适用 NOTICE 保留要求。适合在意明确专利条款的项目。[官方文本](https://www.apache.org/licenses/LICENSE-2.0)
-
-以上仅为选项，未替所有者作决定。若希望衍生作品或网络服务改动也共享源码，应另行评估 copyleft 许可的适用范围与兼容性，而不是把这些要求写成 MIT 的附加限制。
-
-选择后添加完整 LICENSE、正确版权主体与年份、两个 package.json 的相应 SPDX 标识，并复核第三方兼容性。private: true 防止误发 npm，不等于授予或拒绝源码使用许可。
+许可选择不代表已经推送、部署或完成完整安全审计。[MIT 标准文本](https://opensource.org/license/mit)。
 
 ## 当前已准备
 
@@ -23,7 +18,7 @@
 
 ## 发布前仍须完成
 
-- [ ] 维护者选择许可证、确认版权主体及素材来源，添加 LICENSE。
+- [x] 所有者选择 MIT、确定版权主体 zhuowenji，并添加完整 LICENSE；素材来源见 THIRD_PARTY_NOTICES.md。
 - [ ] 在最终提交上重新运行 npm run check 与 npm --prefix backend run check，并保留结果；单独记录可选浏览器测试。
 - [ ] 在真实托管平台验证 CI，启用适用分支保护与私人安全报告，指定维护者和报告处理方式。
 - [ ] 对最终 Git 索引、完整历史、release 附件与最终静态产物重新扫描秘密/个人数据；扫描器无告警不等于没有泄漏。

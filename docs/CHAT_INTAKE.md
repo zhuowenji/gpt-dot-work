@@ -1,0 +1,53 @@
+# 前台问答与私有记录
+
+本模块把上传的「任务聊天」页面作为公开根入口，原始 HTML/CSS 保留；JavaScript 做了身份、接口和真实状态适配。没有纳入上传包的 React office bundle、LAN 无凭证 Agent 接入说明或客户端执行脚本。
+
+## 角色
+
+- 匿名访客：随机 HttpOnly Cookie，只访问自己的问答记录。IP 用于可信代理后的限速，不用于认领记录。
+- 普通账号：可选注册/登录，账号唯一，密码至少 6 个字符，不要求字符组合。登录保存跨设备身份，不会获得管理员权限。
+- 所有者：沿用独立的 owner 密码/会话认证，不受普通账号用户名影响。可查看已提交给本服务的记录、回复和整理摘要/分类。
+
+优先级为已验证 owner、普通账号、匿名访客。角色只由服务端会话产生；客户端提交 role、principal、status、结果或批准字段不会赋予权限。
+
+## 页面
+
+- `/`：发送新问题/需求并继续对话。底部提供可选账号入口；无需登录即可使用。
+- `/admin/` 与 `/admin/chat/`：同一个简单记录界面。普通账号读取自己的记录；所有者读取管理列表。后台没有新任务发布入口。
+- `/demo/`：保留的已明确公开真实结果只读页，不关联问答会话。
+
+附件按钮仍保留，但当前上传和下载均未开放，会显示解释。没有假在线员工、假回复或自动生成的摘要。
+
+## API 边界
+
+问答接口使用 `/api/chat/*`，不复用历史执行任务 `/api/tasks`。对话采用 32 位随机十六进制 ID，消息为服务端整数 ID。仅知道 ID 不足以访问记录；每个读写操作还检查当前主体权限。
+
+- `GET /api/chat/me`：服务器验证身份、CSRF 和当前能力。
+- `GET /api/chat/tasks`、`GET /api/chat/tasks/:id`：当前主体自己的列表与消息。
+- `POST /api/chat/tasks`、`POST /api/chat/tasks/:id/messages`：保存文字；正文为 content、空 attachments、null agent_id。
+- `POST .../:id/pin`、`DELETE .../:id`：置顶或从列表移除自己的记录。
+- `PATCH/DELETE .../:id/messages/:messageId`：仅本人尚未被回复的文字可编辑/撤回。
+- `POST .../:id/queue/reorder`：整理尚未被回复的条目，不是执行调度。
+- `/api/chat/account/session`、`/signup`、`/login`、`/logout`：普通账号入口。
+- `GET /api/admin/chat/tasks`、`GET .../:id`：仅所有者可读取管理记录。
+- `POST .../:id/replies`、`PATCH .../:id/metadata`：仅所有者可实际回复和保存 summary/category。
+
+写操作需要同源 Origin、当前会话 CSRF 和 `X-Idempotency-Key`。同一操作重试使用同一个 key；相同 key 的不同正文被拒绝。错误为 `{error:{code,message}}`。
+
+## 数据与状态
+
+SQLite 使用独立 chat 表保存访客会话、账号、记录、消息、分类、摘要、限速与幂等回执。历史任务数据不被自动改写。访客问题为 `visitor_question`，只有经过独立 OwnerAuth 验证的所有者前台消息才标为 `owner_instruction`。
+
+状态 `queued` 在此只表示收到并保存，`receipt_state` 区分等待回复和已有实际回复。所有接口明确返回 `execution_connected:false`。没有消息因为入库就被发送给 dot 或执行器；连接器接通前不得把“已收到”描述为“正在执行”。
+
+匿名凭据具有有限有效期和空闲期限，清除 Cookie、过期或换设备可能失去访问匿名记录的能力；记录仍可能保留供所有者整理。注册/登录只关联当前浏览器有效访客会话的记录，不按 IP 迁移。关闭/退出账号会清除前台身份相关内存，不能把上一个主体的草稿显示给下一个主体。
+
+正文、每个主体/对话的条数、总容量、会话数与请求频率均有服务端上限。超过限制返回明确错误，不能绕过限制自动开更多身份或重试。原始 IP 不作为主体标识保存。
+
+## 运行与验收
+
+使用 Node.js 24，先 `npm run check` 与 `npm --prefix backend run check`，再构建、按部署文档配置真实 HTTPS origin 和私有数据目录。`npm run dev` 仅视觉预览，不包含后端。
+
+测试应覆盖两个匿名访客、两个普通账号、所有者、注册/登录迁移、退出/过期、跨站请求、伪造主体、重复请求、重启持久化、回复与归类。源代码测试不能代替真实域名下的 Cookie、浏览器像素、移动端和反向代理验收。
+
+真实 dot/MCP 接入、附件存储、密码找回、自动摘要和生产运维属于后续单独验证事项，不是当前网页问答闭环已经完成的能力。

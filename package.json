@@ -8,11 +8,11 @@
     "start": "node backend/service.mjs",
     "build": "node scripts/build.mjs",
     "test": "node --test tests/*.test.js backend/test/*.test.mjs",
-    "check": "node --check src/app.js && node --check src/model.js && node --check scripts/serve.mjs && node --check scripts/build.mjs && node --check scripts/backup.mjs && npm test && node scripts/build.mjs",
+    "check": "node --check task-chat/app.js && node --check task-chat/admin-chat.js && node --check src/app.js && node --check src/model.js && node --check scripts/serve.mjs && node --check scripts/build.mjs && node --check scripts/backup.mjs && npm test && node scripts/build.mjs",
     "dev:demo": "node scripts/serve.mjs",
     "backup": "node scripts/backup.mjs"
   },
-  "license": "UNLICENSED",
+  "license": "MIT",
   "engines": {
     "node": ">=24"
   }
