@@ -244,6 +244,37 @@ test('password hash CLI uses stdin only and generates compatible hashes; revoke 
   assert.equal(client.store.db.prepare('SELECT COUNT(*) AS count FROM owner_sessions').get().count, 0);
 });
 
+test('password hash CLI accepts eight-character passwords that can log in', async t => {
+  const cli = fileURLToPath(new URL('../password-hash.mjs', import.meta.url));
+  // Fictional boundary fixtures only, never deployed credentials.
+  for (const password of ['testonly', '界'.repeat(8), '😀'.repeat(8)]) {
+    const hash = spawnSync(process.execPath, [cli], { input: password + '\r\n', encoding: 'utf8' });
+    assert.equal(hash.status, 0);
+    assert.equal(hash.stderr, '');
+    assert.match(hash.stdout.trim(), /^scrypt\$32768\$8\$1\$/);
+    assert(!hash.stdout.includes(password));
+    const client = await api(t, { WORKSPACE_OWNER_PASSWORD_HASH: hash.stdout.trim() });
+    const logged = await client.request('/api/login', { method: 'POST', body: { password } });
+    assert.equal(logged.status, 200);
+    assert.equal(logged.data.authenticated, true);
+    assert.match(logged.headers.get('set-cookie'), /HttpOnly/);
+  }
+});
+
+test('password hash CLI rejects fewer than eight characters and preserves byte and newline limits', () => {
+  const cli = fileURLToPath(new URL('../password-hash.mjs', import.meta.url));
+  for (const password of ['', 'testonl', '界'.repeat(7), '😀'.repeat(7), 'x'.repeat(1025), 'test\nonly', 'test\ronly']) {
+    const result = spawnSync(process.execPath, [cli], { input: password, encoding: 'utf8' });
+    assert.equal(result.status, 1);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /at least 8 characters and at most 1024 bytes without line breaks/);
+    if (password) assert(!result.stderr.includes(password));
+  }
+  const maximum = spawnSync(process.execPath, [cli], { input: 'x'.repeat(1024), encoding: 'utf8' });
+  assert.equal(maximum.status, 0);
+  assert.match(maximum.stdout.trim(), /^scrypt\$32768\$8\$1\$/);
+});
+
 
 test('browser submission atomically binds authorization to the exact reviewed draft revision', async t => {
   const { request, login, store } = await api(t);

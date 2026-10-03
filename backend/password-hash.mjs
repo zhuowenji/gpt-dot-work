@@ -15,8 +15,8 @@ for await (const chunk of process.stdin) {
 }
 // One terminal line ending from printf/read is allowed; internal newlines rejected.
 const password = Buffer.concat(chunks).toString('utf8').replace(/\r?\n$/, '');
-if (Buffer.byteLength(password) < 16 || Buffer.byteLength(password) > 1024 || /[\r\n]/.test(password)) {
-  process.stderr.write('Use a unique password of 16–1024 bytes without line breaks.\n'); process.exit(1);
+if (Array.from(password).length < 8 || Buffer.byteLength(password) > 1024 || /[\r\n]/.test(password)) {
+  process.stderr.write('Use a unique password of at least 8 characters and at most 1024 bytes without line breaks.\n'); process.exit(1);
 }
 const salt = randomBytes(32);
 const hash = await promisify(scrypt)(password, salt, 32, { N: 32768, r: 8, p: 1, maxmem: 64 * 1024 * 1024 });

@@ -144,7 +144,8 @@ unset OWNER_PASSWORD
 ```
 
 The helper prints only `scrypt$32768$8$1$<base64url salt>$<base64url hash>` and
-requires at least 16 bytes. Copy that hash into the private environment file as
+requires at least 8 characters (Unicode code points), at most 1024 UTF-8 bytes,
+and no line breaks. Copy that hash into the private environment file as
 `WORKSPACE_OWNER_PASSWORD_HASH`. Treat the hash as sensitive configuration. Use a
 unique, high-entropy password from a password manager. Do not commit the password,
 hash, bearer tokens, environment file, SQLite file, or backups. Shell variables are
