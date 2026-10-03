@@ -48,8 +48,9 @@ async function readBody(req) {
 }
 
 export class ChatAccountAuth {
-  constructor(store, config, ownerAuth) {
+  constructor(store, config, ownerAuth, context = null) {
     this.store = store; this.db = store.db; this.config = config; this.ownerAuth = ownerAuth;
+    this.context = context;
     this.secure = Boolean(config.production || config.publicOrigin?.startsWith('https:'));
     this.cookieName = this.secure ? '__Host-chat_account_session' : 'chat_account_session';
     this.guestCookieName = this.secure ? '__Host-chat_session' : 'chat_session';
@@ -167,6 +168,7 @@ export class ChatAccountAuth {
     if (threads > CHAT_ACCOUNT_LIMITS.accountThreads || bytes > CHAT_ACCOUNT_LIMITS.principalBytes) throw new ApiError(429, 'account_migration_limit', 'These guest conversations exceed the account storage limit. Your guest conversations have been kept.');
     this.db.prepare("UPDATE chat_messages SET author = ? WHERE author = ? AND thread_id IN (SELECT id FROM chat_threads WHERE principal = ? AND kind = 'visitor_question')").run(principal, guest.principal, guest.principal);
     this.db.prepare("UPDATE chat_threads SET principal = ? WHERE principal = ? AND kind = 'visitor_question'").run(principal, guest.principal);
+    this.context?.migratePrincipal(guest.principal, principal);
     this.db.prepare('DELETE FROM chat_guest_sessions WHERE principal = ?').run(guest.principal);
     return true;
   }

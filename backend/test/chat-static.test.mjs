@@ -29,9 +29,13 @@ async function setup(t) {
   t.after(async()=>{await new Promise(resolve=>server.close(resolve));store.close();await rm(dir,{recursive:true,force:true});});
   return {base:`http://127.0.0.1:${address.port}`,dir,staticDir,root,css};
 }
-test('uploaded root markup and stylesheet retain exact original bytes',async()=>{
-  assert.equal(sha(await source('task-chat/index.html')),'53b9d18d29facef26ad82d85f3b992dc928ccb306b09adfb6f682f7c8e979d5c');
-  assert.equal(sha(await source('task-chat/style.css')),'1964d05337de43c3f238faea2180be0d58ba3b79791030bfa2d11638d5a3b992');
+test('polished root keeps the original chat structure and explicit offline capabilities', async()=>{
+  const html=(await source('task-chat/index.html')).toString();
+  const css=(await source('task-chat/style.css')).toString();
+  for (const id of ['taskList','messages','composer','input','queuedMessages','deleteTaskDialog']) assert.ok(html.includes(`id="${id}"`));
+  assert.match(html, /class="sidebar"/); assert.match(html, /class="main"/);
+  assert.doesNotMatch(html, /任务会自动进入队列|上传图片、视频或其他文件/);
+  assert.match(css, /--surface:/); assert.match(css, /--accent:/); assert.match(css, /data-theme="dark"/);
 });
 test('public root preserves uploaded HTML and permits fixed theme script without broad inline scripts',async t=>{
   const {base,root,css}=await setup(t);

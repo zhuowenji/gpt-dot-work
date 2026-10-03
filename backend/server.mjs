@@ -1,4 +1,5 @@
 import { createServer } from 'node:http';
+import { performance } from 'node:perf_hooks';
 import { createHash } from 'node:crypto';
 import { readFile, realpath } from 'node:fs/promises';
 import { resolve, sep, extname } from 'node:path';
@@ -92,6 +93,7 @@ export function createApiServer(store, config) {
   const videos = new VideoStore(store);
   const chat = new ChatIntake(store, config, auth);
   const server = createServer(async (req, res) => {
+    const requestStartedAt = performance.now();
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('Referrer-Policy', 'no-referrer');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -120,6 +122,15 @@ export function createApiServer(store, config) {
         const limit = integerQuery(url, 'limit', 50, 100);
         if (limit < 1) throw new ApiError(400, 'invalid_query', 'limit must be at least 1');
         send(res, 200, videos.publicList({ limit })); return;
+      }
+      // These 201 receipts are sent only after the chat transaction commits.
+      // Keep handler timing separate from network delivery and AI execution.
+      if (req.method === 'POST' && /^\/api\/chat\/tasks(?:\/[a-f0-9]{32}\/messages)?$/.test(url.pathname)) {
+        const writeHead = res.writeHead;
+        res.writeHead = function (statusCode, ...args) {
+          if (statusCode === 201) this.setHeader('Server-Timing', `intake-receipt;dur=${(performance.now() - requestStartedAt).toFixed(3)}`);
+          return writeHead.call(this, statusCode, ...args);
+        };
       }
       const session = auth.session(req);
       if (await chat.handle(req, res, url, session)) return;

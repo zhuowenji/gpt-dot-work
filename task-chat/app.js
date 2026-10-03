@@ -38,6 +38,16 @@ let taskLoadVersion = 0;
 let editingId = null;
 let editingUnavailable = false;
 let draggedQueueId = null;
+let receivedMessageId = null;
+let pendingNavigation = null;
+let rapidPollUntil = 0;
+let rapidPollRemaining = 30;
+let pollBudgetResetAt = Date.now() + 900000;
+let nextPollAt = 0;
+let pollInFlight = false;
+let pollFailures = 0;
+let currentReceiptState = null;
+let lastListRefresh = 0;
 let taskToDelete = null;
 let renderedTaskId = null;
 let renderedContent = null;
@@ -46,6 +56,7 @@ let readReplies = Object.create(null);
 const drafts = new Map();
 const pendingRequests = new Map();
 const inFlightMutations = new Map();
+const activeRequests = new Set();
 // No conversation, owner draft, CSRF token or identity is persisted in web storage.
 // Remove the older, unscoped archive caches rather than restoring another user's draft.
 try {
@@ -60,6 +71,25 @@ function setTheme(theme) {
 }
 for (const button of themeButtons) button.onclick = () => setTheme(button.dataset.themeChoice);
 setTheme(document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light');
+// Keep only the selected opaque thread ID in the URL, never drafts or identity.
+function routeId() {
+  const match = /^#thread=([a-f0-9]{32})$/.exec(window.location?.hash || '');
+  return match ? match[1] : null;
+}
+function writeNavigation(id, replace = false) {
+  if (!window.history || !window.location) return;
+  const hash = id ? '#thread=' + id : '';
+  if (window.location.hash === hash) return;
+  window.history[replace ? 'replaceState' : 'pushState'](null, '', window.location.pathname + window.location.search + hash);
+}
+async function restoreNavigation() {
+  if (busy) { pendingNavigation = window.location?.hash || ''; return; }
+  const id = routeId();
+  if (id) await openTask(id, true, false);
+  else if (currentId) newTask(false);
+}
+window.addEventListener('popstate', restoreNavigation);
+window.addEventListener('hashchange', restoreNavigation);
 function apiPath(path) {
   if (path === '/api/me') return '/api/chat/me';
   if (path === '/api/agents') return '/api/chat/agents';
@@ -73,6 +103,7 @@ function errorMessage(data, fallback = '请求失败，请稍后重试') {
 }
 async function request(path, options = {}) {
   const abort = new AbortController();
+  activeRequests.add(abort);
   const timer = setTimeout(() => abort.abort(), 15000);
   try {
     const response = await fetch(path, {cache:'no-store', credentials:'same-origin', ...options, signal:abort.signal});
@@ -89,25 +120,29 @@ async function request(path, options = {}) {
   } catch (error) {
     if (error.name === 'AbortError' || error instanceof TypeError) throw new Error('连接中断，无法确认操作结果。请重试原操作。');
     throw error;
-  } finally { clearTimeout(timer); }
+  } finally { clearTimeout(timer); activeRequests.delete(abort); }
 }
 function showWelcome() {
   title.textContent = '新任务';
   status.textContent = identityReady ? '可发送文字，等待接收' : '正在验证访客身份';
   messages.replaceChildren();
   const welcome = document.createElement('div'); welcome.className = 'welcome';
-  const mark = document.createElement('div'); mark.className = 'welcome-mark'; mark.textContent = '✦';
+  const mark = document.createElement('div'); mark.className = 'welcome-mark'; mark.textContent = '·';
   const heading = document.createElement('h1'); heading.textContent = identity?.role === 'owner' ? '今天想安排什么？' : '今天想问什么？';
   const paragraph = document.createElement('p');
   paragraph.textContent = identity?.role === 'owner' ? '指令会保存到你的专属对话，执行连接器尚未配置。' : '把问题写在这里，收到后等待所有者回复。';
   welcome.append(mark, heading, paragraph); messages.append(welcome);
 }
-function clearPrincipal({preserveIdentityCheck = false} = {}) {
+function clearPrincipal({preserveIdentityCheck = false, preserveNavigation = false} = {}) {
+  if (identityKey && !preserveNavigation) writeNavigation(null, true);
+  for (const request of activeRequests) request.abort();
+  activeRequests.clear();
   if (!preserveIdentityCheck) { ++identityGeneration; identityPromise = null; }
   ++principalVersion; ++listLoadVersion; ++taskLoadVersion;
   identity = null; identityKey = null; identityReady = false;
+  rapidPollUntil = 0; nextPollAt = 0; pollFailures = 0; currentReceiptState = null;
   currentId = null; editingId = null; editingUnavailable = false;
-  draggedQueueId = null; taskToDelete = null; taskLoading = false;
+  draggedQueueId = null; receivedMessageId = null; pendingNavigation = null; taskToDelete = null; taskLoading = false;
   drafts.clear(); pendingRequests.clear(); inFlightMutations.clear(); readReplies = Object.create(null);
   renderedTaskId = null; renderedContent = null; renderedMessageIds.clear();
   input.value = ''; list.replaceChildren(); messages.replaceChildren(); queuedMessages.replaceChildren();
@@ -188,17 +223,17 @@ async function api(path, options = {}) {
 function guidance() {
   if (!identityReady) return '身份验证后可发送文字；附件上传尚未开放。';
   return identity.role === 'owner'
-    ? '所有者指令仅保存；执行连接器尚未配置，不会自动执行。对话可在管理记录中查看。'
+    ? '指令会保存到专属对话，执行连接器尚未配置。Enter 发送 · Shift + Enter 换行。'
     : identity.role === 'account'
-      ? '已登录，自己的对话与整理记录可在其他设备登录后继续查看。执行连接器尚未配置，等待所有者回复；附件暂未开放。'
-      : '无需登录即可提问。浏览器 Cookie 找回自己的对话；清除 Cookie 或更换设备会失去连续记录。可选注册登录以跨设备保存记录。执行连接器未配置；附件暂未开放。';
+      ? '对话随账号保存，等待所有者回复。Enter 发送 · Shift + Enter 换行。'
+      : '访客对话保存在当前浏览器身份下，清除 Cookie 后无法找回。登录可跨设备查看。';
 }
 function writeHint(prefix = '') {
   hint.replaceChildren(document.createTextNode((prefix ? prefix + ' ' : '') + guidance()));
-  if (identityReady && ['owner', 'account'].includes(identity.role)) {
+  if (identityReady && identity.role === 'owner') {
     const link = document.createElement('a'); link.href = '/admin/'; link.textContent = identity.role === 'owner' ? ' 查看管理记录' : ' 查看我的记录'; hint.append(link);
   }
-  hint.style.color = prefix ? '#c05045' : '';
+  hint.classList[prefix ? 'add' : 'remove']('is-error');
 }
 function showError(error) { writeHint(error?.message || '请求失败，请稍后重试'); }
 function clearError() { writeHint(); }
@@ -227,16 +262,17 @@ function restoreDraft() {
   editNotice.hidden = !editingId;
 }
 input.addEventListener('input', saveDraft);
-function newTask() {
+function newTask(navigate = true) {
   if (busy || !identityReady) return;
   saveDraft(); ++taskLoadVersion; taskLoading = false; currentId = null;
-  renderedTaskId = null; renderedContent = null; renderedMessageIds.clear();
+  if (navigate) writeNavigation(null);
+  renderedTaskId = null; renderedContent = null; renderedMessageIds.clear(); receivedMessageId = null;
   queuedMessages.replaceChildren(); queuedMessages.hidden = true;
   restoreDraft(); showWelcome(); clearError(); updateComposer(); input.focus();
   renderList().catch(showError);
 }
 function taskLabel(task) {
-  return task.receipt_state === 'replied' ? '已收到所有者回复' : '已收到，等待接收';
+  return task.receipt_state === 'replied' ? '已收到所有者回复' : '已收到，等待所有者回复';
 }
 function markRead(id, replyId) {
   if (replyId) readReplies[id] = Math.max(Number(readReplies[id] || 0), replyId);
@@ -282,6 +318,8 @@ async function renderList() {
     actions.append(pin, remove); row.append(button, actions); list.append(row);
   }
   document.title = anyUnread ? '● 任务聊天' : '任务聊天';
+  lastListRefresh = Date.now();
+  return true;
 }
 function showDeleteTaskDialog(task) {
   if (busy || taskLoading || deleteTaskDialog.open) return;
@@ -334,27 +372,31 @@ function renderQueueCard(entry, id) {
   };
   actions.append(edit, remove); card.append(grip, content, actions); queuedMessages.append(card);
 }
-async function openTask(id, scrollToBottom = false) {
+async function openTask(id, scrollToBottom = false, navigate = true) {
   if (!taskIdPattern.test(id) || busy || draggedQueueId || (taskLoading && currentId === id)) return;
   const version = ++taskLoadVersion;
   const switching = currentId !== id;
   if (switching) { taskLoading = true; updateComposer(); }
   let data;
   try { data = await api('/api/tasks/' + id); }
-  catch (error) { if (version === taskLoadVersion) showError(error); return; }
+  catch (error) { if (version === taskLoadVersion) { if (error.status === 404 && routeId() === id) { writeNavigation(null, true); if (currentId) newTask(false); } showError(error); } return false; }
   finally { if (version === taskLoadVersion) { taskLoading = false; updateComposer(); } }
   if (version !== taskLoadVersion || busy) return;
   if (data?.task?.id !== id || !Array.isArray(data.messages)) throw new Error('对话响应无效');
   if (switching) { saveDraft(); currentId = id; restoreDraft(); }
+  if (navigate) writeNavigation(id);
   if (document.visibilityState === 'visible') markRead(id, Math.max(0, ...data.messages.filter(entry => entry.role === 'agent').map(entry => Number(entry.id) || 0)));
   title.textContent = data.task.title; status.textContent = taskLabel(data.task);
+  currentReceiptState = data.task.receipt_state;
   if (editingId && !data.messages.some(entry => entry.id === editingId && entry.queued_editable)) {
     editingUnavailable = true; showError(new Error('这条消息已不可编辑；文字已保留，请复制后取消编辑。'));
   }
   const fingerprint = JSON.stringify(data);
   if (renderedTaskId === id && renderedContent === fingerprint) {
     if (scrollToBottom) messages.scrollTop = messages.scrollHeight;
-    updateComposer(); renderList().catch(showError); return;
+    updateComposer();
+    if (Date.now() - lastListRefresh > 30000) await renderList();
+    return true;
   }
   const scrollTop = messages.scrollTop;
   const nearBottom = messages.scrollHeight - messages.clientHeight - scrollTop < 80;
@@ -362,7 +404,13 @@ async function openTask(id, scrollToBottom = false) {
   const hasNewContent = renderedTaskId !== id || [...ids].some(messageId => !renderedMessageIds.has(messageId));
   messages.replaceChildren(); queuedMessages.replaceChildren();
   if (queuedMessages.parentElement !== form.parentElement) form.parentElement.insertBefore(queuedMessages, form);
-  for (const entry of data.messages) {
+  // The earliest unanswered message is already received in the conversation.
+  // Only later unanswered follow-ups belong in the editable queue, never both.
+  const unanswered = data.messages.filter(entry => entry.role === 'user' && entry.queued_editable);
+  receivedMessageId = unanswered.length ? Math.min(...unanswered.map(entry => Number(entry.id))) : null;
+  const followups = unanswered.filter(entry => Number(entry.id) !== receivedMessageId);
+  const followupIds = new Set(followups.map(entry => entry.id));
+  for (const entry of data.messages.filter(entry => !followupIds.has(entry.id))) {
     const item = document.createElement('div'); item.className = 'message ' + (entry.role === 'user' ? 'user' : entry.role === 'error' ? 'error' : 'agent');
     const who = document.createElement('div'); who.className = 'who';
     who.textContent = entry.role === 'user' ? (identity.role === 'owner' ? '你（所有者指令）' : '你') : entry.role === 'agent' ? '所有者回复' : '接收状态';
@@ -371,15 +419,16 @@ async function openTask(id, scrollToBottom = false) {
     // Intake has no attachments or executable reply markup; render server text only.
     messages.append(item);
   }
-  for (const entry of data.messages.filter(entry => entry.role === 'user' && entry.queued_editable).sort((a,b) => (a.queue_position ?? a.id) - (b.queue_position ?? b.id) || a.id - b.id)) renderQueueCard(entry, id);
+  for (const entry of followups.sort((a,b) => (a.queue_position ?? a.id) - (b.queue_position ?? b.id) || a.id - b.id)) renderQueueCard(entry, id);
   queuedMessages.hidden = queuedMessages.childElementCount === 0;
   if (data.task.receipt_state !== 'replied') {
-    const waiting = document.createElement('div'); waiting.className = 'waiting'; waiting.textContent = '已收到，等待接收。执行连接器尚未配置。'; messages.append(waiting);
+    const waiting = document.createElement('div'); waiting.className = 'waiting'; waiting.textContent = '消息已保存，等待所有者回复。执行连接器尚未配置。'; messages.append(waiting);
   }
   updateComposer();
   messages.scrollTop = scrollToBottom || switching || (hasNewContent && nearBottom) ? messages.scrollHeight : scrollTop;
   renderedTaskId = id; renderedContent = fingerprint; renderedMessageIds = ids;
-  renderList().catch(showError);
+  await renderList();
+  return true;
 }
 queuedMessages.addEventListener('dragover', event => {
   if (!draggedQueueId) return;
@@ -394,7 +443,7 @@ queuedMessages.addEventListener('drop', async event => {
   if (!draggedQueueId || busy || !currentId) return;
   event.preventDefault();
   const id = currentId;
-  const message_ids = [...queuedMessages.children].map(card => Number(card.dataset.messageId));
+  const message_ids = [receivedMessageId, ...[...queuedMessages.children].map(card => Number(card.dataset.messageId))].filter(id => Number.isSafeInteger(id));
   draggedQueueId = null; ++taskLoadVersion; busy = true; updateComposer();
   try { await api(`/api/tasks/${id}/queue/reorder`, {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message_ids})}); }
   catch (error) { showError(error); }
@@ -423,9 +472,11 @@ form.addEventListener('submit', async event => {
       currentId = created.id;
     }
     drafts.delete(draftKey); input.value = ''; clearError();
+    rapidPollUntil = Date.now() + 30000; nextPollAt = 0;
   } catch (error) { showError(error); }
   finally { busy = false; updateComposer(); }
-  if (currentId && identityReady) openTask(currentId, true).catch(showError);
+  if (pendingNavigation !== null) { pendingNavigation = null; restoreNavigation().catch(showError); }
+  else if (currentId && identityReady) openTask(currentId, true).catch(showError);
 });
 input.addEventListener('keydown', event => {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); form.requestSubmit(); }
@@ -444,26 +495,41 @@ document.addEventListener('drop', event => { if (event.dataTransfer.files.length
 document.querySelector('#cancelEdit').onclick = () => {
   editingId = null; editingUnavailable = false; editNotice.hidden = true; input.value = ''; saveDraft(); clearError(); updateComposer();
 };
-document.querySelector('#newTask').onclick = newTask;
+document.querySelector('#newTask').onclick = () => newTask();
+function pollingDelay(now = Date.now()) {
+  if (pollFailures) return Math.min(30000, 5000 * 2 ** Math.min(pollFailures, 3));
+  return currentId && currentReceiptState !== 'replied' && now < rapidPollUntil && rapidPollRemaining > 0 ? 1000 : 5000;
+}
 async function refresh() {
-  if (document.hidden || busy || taskLoading || draggedQueueId) return;
+  if (document.hidden || busy || taskLoading || draggedQueueId || pollInFlight || Date.now() < nextPollAt) return;
+  if (Date.now() >= pollBudgetResetAt) { rapidPollRemaining = 30; pollBudgetResetAt = Date.now() + 900000; }
+  pollInFlight = true;
   try {
-    await initializeIdentity();
-    if (currentId) await openTask(currentId); else await renderList();
-  } catch (error) { showError(error); }
+    // api() verifies identity; do not add another identity request or reload an
+    // unchanged sidebar every second. The short fast window stays rate-bounded.
+    const result = currentId ? await openTask(currentId) : await renderList();
+    pollFailures = result === false ? pollFailures + 1 : 0;
+  } catch (error) { pollFailures += 1; showError(error); }
+  finally {
+    pollInFlight = false;
+    const delay = pollingDelay();
+    if (delay === 1000) rapidPollRemaining -= 1;
+    nextPollAt = Date.now() + delay;
+  }
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
 window.addEventListener('focus', refresh);
 // Clear private state before BFCache can retain an owner view across logout/navigation.
-window.addEventListener('pagehide', clearPrincipal);
-window.addEventListener('pageshow', event => { if (event.persisted) refresh(); });
+window.addEventListener('pagehide', () => clearPrincipal({preserveNavigation:true}));
+window.addEventListener('pageshow', event => { if (event.persisted) initializeIdentity().then(restoreNavigation).then(refresh).catch(showError); });
 window.refreshChatAgents = refresh;
 // Optional accounts live in the existing footer; ordinary questioning never requires login.
 const accountFooter = document.createElement('div');
+accountFooter.className = 'account-footer';
 accountFooter.style.marginTop = '10px';
 document.querySelector('.identity').append(accountFooter);
 const accountDialog = document.createElement('dialog');
-accountDialog.className = 'delete-task-dialog';
+accountDialog.className = 'delete-task-dialog account-dialog';
 accountDialog.setAttribute('aria-labelledby', 'accountDialogTitle');
 const accountForm = document.createElement('form');
 const accountHeading = document.createElement('h2'); accountHeading.id = 'accountDialogTitle';
@@ -478,8 +544,8 @@ usernameLabel.append(usernameInput); passwordLabel.append(passwordInput);
 const accountError = document.createElement('p'); accountError.className = 'delete-task-error'; accountError.setAttribute('role', 'alert');
 const accountActions = document.createElement('div'); accountActions.className = 'delete-task-actions';
 const accountCancel = document.createElement('button'); accountCancel.type = 'button'; accountCancel.textContent = '取消';
-const accountSubmit = document.createElement('button'); accountSubmit.type = 'submit';
-const accountSwitch = document.createElement('button'); accountSwitch.type = 'button'; accountSwitch.style.marginTop = '12px';
+const accountSubmit = document.createElement('button'); accountSubmit.type = 'submit'; accountSubmit.className = 'account-submit';
+const accountSwitch = document.createElement('button'); accountSwitch.type = 'button'; accountSwitch.className = 'account-switch'; accountSwitch.style.marginTop = '12px';
 accountActions.append(accountCancel, accountSubmit);
 accountForm.append(accountHeading, accountNote, usernameLabel, passwordLabel, accountError, accountActions, accountSwitch);
 accountDialog.append(accountForm); document.body.append(accountDialog);
@@ -514,7 +580,9 @@ function updateAccountFooter() {
       } catch (error) { clearPrincipal(); showError(error); }
       finally { accountBusy = false; logout.disabled = false; }
     };
-    accountFooter.append(name, records, logout);
+    accountFooter.append(name);
+    if (identity.role === 'owner') accountFooter.append(records);
+    accountFooter.append(logout);
   } else {
     const login = document.createElement('button'); login.type = 'button'; login.textContent = '登录 / 注册'; login.disabled = !identityReady;
     login.onclick = () => { if (busy || accountBusy) return; accountModeChanged('login'); accountDialog.showModal(); usernameInput.focus(); };
@@ -544,5 +612,5 @@ accountForm.onsubmit = async event => {
 };
 window.addEventListener('pagehide', () => { passwordInput.value = ''; usernameInput.value = ''; accountRequestKey = null; if (accountDialog.open) accountDialog.close(); });
 clearPrincipal(); clearError();
-initializeIdentity().then(async () => { clearError(); await renderList(); }).catch(showError);
-setInterval(refresh, 5000);
+initializeIdentity().then(async () => { clearError(); await restoreNavigation(); await renderList(); }).catch(showError);
+setInterval(refresh, 1000);

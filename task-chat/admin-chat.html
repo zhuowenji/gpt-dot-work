@@ -3,42 +3,57 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f7f8fa">
   <title>对话记录</title>
-  <style>
-    :root{font-family:system-ui,"Microsoft YaHei",sans-serif;color:#202532;background:#f7f8fa}*{box-sizing:border-box}body{margin:0}main{max-width:1100px;margin:auto;padding:24px}header{display:flex;gap:16px;align-items:center;flex-wrap:wrap}h1{font-size:24px;margin:0 auto 0 0}h2{font-size:19px}a{color:#4452b5}button,input,textarea{font:inherit}button{cursor:pointer;padding:7px 12px;border:1px solid #c9cede;border-radius:7px;background:#fff;color:#303a65}button:disabled{cursor:default;opacity:.55}input,textarea{width:100%;padding:9px;border:1px solid #c9cede;border-radius:7px;background:#fff;color:inherit}label{display:block;margin:12px 0}textarea{min-height:90px;resize:vertical}.panel{margin-top:20px;padding:20px;border:1px solid #dce0eb;border-radius:10px;background:#fff}.muted{color:#606a80;font-size:14px;line-height:1.6}#notice{min-height:24px;color:#a34035}table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:11px;text-align:left;border-bottom:1px solid #e4e7ef;overflow-wrap:anywhere}th{white-space:nowrap}td:first-child{max-width:280px}td:nth-child(4){max-width:340px}.table-wrap{overflow-x:auto}.message{white-space:pre-wrap;overflow-wrap:anywhere;border-bottom:1px solid #e5e7ef;padding:12px 0}.message strong{display:block;margin-bottom:6px;font-size:13px}.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.row label{flex:1;min-width:160px}#ownerLogin{max-width:430px}[hidden]{display:none!important}@media(max-width:600px){main{padding:16px}.panel{padding:14px}}
-  </style>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/admin/chat/app.js" defer></script>
 </head>
-<body>
-<main>
-  <header><h1>对话记录</h1><a href="/">返回提问页面</a><span id="identity" class="muted">验证身份中…</span><button id="logout" type="button" hidden>退出登录</button></header>
-  <p class="muted">这里只查看对话、整理分类和摘要。所有新问题或指令请在首页提交。执行连接器尚未配置，不会自动执行。</p>
-  <p id="notice" role="status" aria-live="polite"></p>
-  <section id="loginPanel" class="panel" hidden>
-    <h2>需要登录</h2>
-    <p>普通用户请在<a href="/">首页底部登录或注册</a>，以查看自己的记录。访客也可直接在首页提问。</p>
-    <details><summary>网站所有者入口</summary>
-      <form id="ownerLogin"><label>所有者密码<input id="ownerPassword" type="password" autocomplete="current-password" required></label><button type="submit">登录管理记录</button></form>
-    </details>
-  </section>
-  <section id="recordsPanel" class="panel" hidden>
-    <div class="row"><label>本页分类筛选<input id="categoryFilter" type="search" placeholder="全部分类"></label><button id="refresh" type="button">刷新记录</button></div>
-    <p id="recordsDescription" class="muted"></p>
-    <div class="table-wrap"><table><thead><tr><th>对话</th><th>提交者</th><th>分类</th><th>摘要</th><th>接收状态</th></tr></thead><tbody id="records"></tbody></table></div>
-    <p id="empty" class="muted" hidden>暂无符合条件的记录。</p>
-    <div class="row"><button id="previousPage" type="button" disabled>上一页</button><span id="pageStatus" class="muted"></span><button id="nextPage" type="button" disabled>下一页</button></div>
-  </section>
-  <section id="detailPanel" class="panel" hidden>
-    <div class="row"><h2 id="detailTitle"></h2><button id="closeDetail" type="button">关闭详情</button></div>
-    <div id="threadMessages"></div>
-    <form id="metadataForm">
-      <label>分类<input id="category" maxlength="80" placeholder="未分类"></label>
-      <label>对话摘要<textarea id="summary" maxlength="4000" placeholder="尚未整理"></textarea></label>
-      <p class="muted">分类和摘要是手工保存的记录，不会自动生成知识或触发执行。</p>
-      <button id="saveMetadata" type="submit">保存整理记录</button>
-    </form>
-    <form id="replyForm" hidden><label>回复这条访客问题<textarea id="reply" maxlength="8000" required></textarea></label><p class="muted">发送后，提交此问题的访客或用户可以在原对话中看到这条回复。</p><button id="sendReply" type="submit">发送回复</button></form>
-  </section>
-</main>
-<script src="/admin/chat/app.js" defer></script>
+<body class="records-app">
+  <header class="records-topbar">
+    <a class="records-brand" href="/" aria-label="任务聊天首页"><span class="mark" aria-hidden="true">·</span>任务聊天</a>
+    <nav aria-label="工作区"><a href="/">提问</a><a href="/admin/" aria-current="page">对话记录</a></nav>
+    <div class="records-account"><span id="identity">验证身份中…</span><button id="logout" type="button" hidden>退出</button></div>
+    <div class="theme-switch" role="group" aria-label="页面主题"><button type="button" data-theme-choice="light" aria-label="白天模式">☀ <span>白天</span></button><button type="button" data-theme-choice="dark" aria-label="黑夜模式">☾ <span>黑夜</span></button></div>
+  </header>
+  <main class="records-main">
+    <div class="records-heading"><div><p class="eyebrow">记录与整理</p><h1>对话记录</h1><p id="recordsDescription" class="muted">查看回复进度，整理值得留下的信息。</p></div><div class="connection-note"><span aria-hidden="true"></span>执行连接器未配置<small>仅接收消息与人工回复</small></div></div>
+    <p id="notice" class="records-notice" role="status" aria-live="polite"></p>
+    <section id="loginPanel" class="record-panel login-panel" hidden>
+      <h2>管理员登录</h2><p class="muted">后台仅向网站管理员开放。普通用户请在<a href="/">前台</a>提问和查看自己的对话。</p>
+      <form id="ownerLogin"><label>所有者密码<input id="ownerPassword" type="password" autocomplete="current-password" required></label><button class="primary-button" type="submit">登录管理记录</button></form>
+    </section>
+    <section id="recordsPanel" hidden aria-label="对话记录工作区">
+      <div class="overview-heading"><span>本页概览</span><span id="overviewScope"></span></div>
+      <div class="record-overview" aria-label="本页真实记录统计">
+        <div><span>待回复</span><strong id="waitingCount">—</strong><small>等待所有者回复</small></div>
+        <div><span>已回复</span><strong id="repliedCount">—</strong><small>已收到所有者回复</small></div>
+        <div><span>摘要已整理</span><strong id="summarizedCount">—</strong><small>已保存非空摘要</small></div>
+        <div><span>尚未整理</span><strong id="unorganizedCount">—</strong><small>还没有保存摘要</small></div>
+      </div>
+      <div class="records-workspace">
+        <div class="records-tabs" role="group" aria-label="记录视图"><button type="button" id="conversationView" aria-pressed="true">全部对话</button><button type="button" id="knowledgeView" aria-pressed="false">摘要知识</button><span id="viewDescription">回复进度与整理状态分开记录</span></div>
+        <div class="records-filters">
+          <label class="search-label"><span class="sr-only">搜索本页对话和摘要</span><input id="searchRecords" type="search" placeholder="搜索对话、摘要或提交者"></label>
+          <label><span class="sr-only">本页分类筛选</span><select id="categoryFilter"><option value="">全部分类</option></select></label>
+          <label><span class="sr-only">回复状态筛选</span><select id="replyFilter"><option value="">全部回复状态</option><option value="waiting">待回复</option><option value="replied">已回复</option></select></label>
+          <label><span class="sr-only">整理状态筛选</span><select id="summaryFilter"><option value="">全部整理状态</option><option value="saved">摘要已整理</option><option value="missing">尚未整理</option></select></label>
+          <button id="refresh" type="button">刷新</button><button id="clearFilters" type="button" class="quiet-button" hidden>清除筛选</button>
+        </div>
+        <div id="tableView" class="table-wrap"><table><thead><tr><th>对话 / 提交者</th><th>回复状态</th><th>分类</th><th>摘要</th><th>最近更新</th><th><span class="sr-only">操作</span></th></tr></thead><tbody id="records"></tbody></table></div>
+        <div id="knowledgeList" class="knowledge-list" hidden></div>
+        <div id="empty" class="records-empty" hidden><h2 id="emptyTitle">还没有对话记录</h2><p id="emptyDescription">从首页收到的新消息会显示在这里。</p></div>
+        <footer class="records-pagination"><span id="resultCount" class="muted"></span><div><button id="previousPage" type="button" disabled>上一页</button><span id="pageStatus" class="muted"></span><button id="nextPage" type="button" disabled>下一页</button></div></footer>
+      </div>
+    </section>
+    <section id="detailPanel" class="record-panel record-detail" hidden aria-labelledby="detailTitle" tabindex="-1">
+      <div class="detail-heading"><div><p class="eyebrow">对话详情</p><h2 id="detailTitle"></h2><p id="detailMeta" class="muted"></p></div><button id="closeDetail" type="button">收起详情</button></div>
+      <div class="detail-grid"><div class="detail-conversation"><h3>原始对话</h3><div id="threadMessages"></div></div><div class="detail-curation"><section class="saved-summary"><div class="section-heading"><h3>已保存的摘要</h3><span id="detailSummaryState" class="status-badge"></span></div><p id="detailSummary"></p><p id="detailCategory" class="muted"></p></section>
+        <form id="metadataForm"><h3>整理记录</h3><label>分类<input id="category" maxlength="80" placeholder="未分类"></label><label>对话摘要<textarea id="summary" maxlength="4000" placeholder="写下结论、关键背景或可复用的信息"></textarea></label><p class="muted">手工保存后才显示为已整理；不会自动生成或启动执行。</p><button id="saveMetadata" class="primary-button" type="submit">保存分类与摘要</button></form>
+        <form id="replyForm" hidden><h3>回复对话</h3><label><span class="sr-only">回复这条问题</span><textarea id="reply" maxlength="8000" placeholder="回复会显示在提交者的原对话中" required></textarea></label><button id="sendReply" class="primary-button" type="submit">发送回复</button></form>
+      </div></div>
+      <section class="reviewed-memory" aria-labelledby="memoryTitle"><div class="section-heading"><h3 id="memoryTitle">已审阅的记忆</h3><span class="muted">按提交者隔离</span></div><p class="muted">事实、偏好与任务仅在人工审阅后保存。标明来源和确认程度，不会把普通消息自动当作事实。</p><p id="memoryNotice" class="muted" role="status"></p><div id="memoryList"></div></section>
+    </section>
+    <p class="records-footnote">这里只查看对话、回复和整理信息。新问题或指令请在<a href="/">首页</a>提交。</p>
+  </main>
 </body>
 </html>

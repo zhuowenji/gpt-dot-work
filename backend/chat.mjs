@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { ApiError } from './store.mjs';
 import { digest, constantEqual } from './auth.mjs';
 import { ChatAccountAuth } from './chat-auth.mjs';
+import { ChatContextStore } from './chat-context.mjs';
 
 // Intake is deliberately separate from TaskStore's executable task state machine.
 // These are resource ceilings, not promises that a worker is available.
@@ -109,7 +110,8 @@ export class ChatIntake {
     if (!columns.has('summary')) this.db.exec("ALTER TABLE chat_threads ADD COLUMN summary TEXT NOT NULL DEFAULT ''");
     if (!columns.has('category')) this.db.exec("ALTER TABLE chat_threads ADD COLUMN category TEXT NOT NULL DEFAULT '未分类'");
     this.cleanup();
-    this.accounts = new ChatAccountAuth(store, config, auth);
+    this.context = new ChatContextStore(store);
+    this.accounts = new ChatAccountAuth(store, config, auth, this.context);
   }
 
   cleanup() {
@@ -289,6 +291,32 @@ export class ChatIntake {
     if (!admin && req.method === 'GET' && path === `${prefix}/agents`) { send(res, 200, { agents: [] }); return true; }
     if (!admin && (path === `${prefix}/uploads` || path.startsWith(`${prefix}/uploads/`))) throw new ApiError(503, 'uploads_unavailable', 'Uploads and downloads are not available in this intake service');
     if (req.method === 'GET' && path === `${prefix}/tasks`) { send(res, 200, this.list(session.principal, admin, url)); return true; }
+    const contextMatch = new RegExp(`^${prefix}/tasks/([a-f0-9]{32})/(context|memory)(?:/([a-f0-9-]{36}))?$`).exec(path);
+    if (contextMatch) {
+      const [, threadId, action, entryId] = contextMatch;
+      this.thread(threadId, session.principal, admin);
+      if (req.method === 'GET') {
+        if (action === 'context' && !entryId) {
+          if ([...url.searchParams.keys()].some(key => key !== 'query') || url.searchParams.getAll('query').length > 1) throw new ApiError(400, 'invalid_query', 'Only one query parameter is accepted');
+          send(res, 200, this.context.getContext(threadId, { query: url.searchParams.get('query') || '' })); return true;
+        }
+        if (action === 'memory') {
+          if (url.search) throw new ApiError(400, 'invalid_query', 'Memory endpoints do not accept query parameters');
+          send(res, 200, entryId ? this.context.history(threadId, entryId) : { memory: this.context.listMemory(threadId, { includeInactive: true }), context_version: this.context.version(threadId) }); return true;
+        }
+      }
+      if (action !== 'memory' || url.search || !(admin && req.method === 'POST' && !entryId || !admin && req.method === 'PATCH' && entryId)) throw new ApiError(404, 'not_found', 'Endpoint not found');
+      const body = await readBody(req);
+      const result = this.idempotent(req, session, path, body, () => {
+        this.thread(threadId, session.principal, admin);
+        if (!admin) return { memory: this.context.correct(threadId, entryId, body, session), context_version: this.context.version(threadId) };
+        fields(body, ['expected_context_version', 'memory_patch']);
+        this.context.assertVersion(threadId, body.expected_context_version);
+        if (!Array.isArray(body.memory_patch) || !body.memory_patch.length) throw new ApiError(400, 'invalid_context', 'Provide at least one reviewed memory change');
+        return this.context.writeback(threadId, { memory_patch: body.memory_patch }, { actor: 'owner' });
+      });
+      send(res, 200, result); return true;
+    }
     const match = new RegExp(`^${prefix}/tasks/([a-f0-9]{32})(?:/(pin|messages|queue/reorder|replies|metadata)(?:/([1-9][0-9]*))?)?$`).exec(path);
     if (req.method === 'GET' && match && !match[2]) { send(res, 200, this.detail(this.thread(match[1], session.principal, admin), admin)); return true; }
     if (!mutation) throw new ApiError(404, 'not_found', 'Endpoint not found');
@@ -316,6 +344,8 @@ export class ChatIntake {
       const row = this.thread(id, session.principal, admin);
       if (req.method === 'DELETE' && !action) {
         fields(body, []);
+        const sourceIds = this.db.prepare('SELECT id FROM chat_messages WHERE thread_id = ?').all(id).map(message => message.id);
+        this.context.invalidateSources(id, sourceIds, `user:${session.principal}`);
         this.db.prepare('UPDATE chat_threads SET deleted_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND principal = ?').run(this.store.now(), this.store.now(), id, session.principal);
         return { id, deleted: true };
       }
@@ -327,10 +357,12 @@ export class ChatIntake {
         return { id, pinned: body.pinned };
       }
       if (action === 'replies') {
-        fields(body, ['content']);
+        fields(body, ['content', 'context', 'expected_context_version']);
         const text = content(body.content);
+        if (body.context !== undefined || body.expected_context_version !== undefined) this.context.assertVersion(id, body.expected_context_version);
         const messageId = this.insertMessage(row, text, 'agent', 'owner');
         this.db.prepare('UPDATE chat_messages SET editable = 0 WHERE thread_id = ? AND role = ?').run(id, 'user');
+        if (body.context !== undefined) this.context.writeback(id, body.context, { actor: 'owner', sourceMessageIds: [messageId] });
         return { id: messageId, task_id: id, replied: true, execution_connected: false };
       }
       if (action === 'metadata') {
@@ -341,8 +373,8 @@ export class ChatIntake {
         }
         const summary = body.summary === undefined ? row.summary : body.summary.trim();
         const category = body.category === undefined ? row.category : body.category.trim() || '未分类';
-        this.db.prepare('UPDATE chat_threads SET summary = ?, category = ? WHERE id = ?').run(summary, category, id);
-        this.bump(id);
+        const sourceIds = this.db.prepare('SELECT id FROM chat_messages WHERE thread_id = ? AND deleted_at IS NULL ORDER BY id DESC LIMIT 40').all(id).map(message => message.id);
+        this.context.writeback(id, { summary: { text: summary, certainty: 'inferred', source_message_ids: sourceIds }, category }, { actor: 'owner' });
         return { id, summary, category };
       }
       if (action === 'messages' && !rawMessageId) {
@@ -362,6 +394,7 @@ export class ChatIntake {
           fields(body, []);
           this.db.prepare('UPDATE chat_messages SET deleted_at = ?, editable = 0, updated_at = ? WHERE id = ? AND thread_id = ? AND author = ?').run(this.store.now(), this.store.now(), messageId, id, session.principal);
         }
+        this.context.invalidateSources(id, [messageId], `user:${session.principal}`);
         this.bump(id);
         return { id: messageId, ...(req.method === 'PATCH' ? { updated: true } : { deleted: true }) };
       }

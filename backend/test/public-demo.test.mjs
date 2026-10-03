@@ -44,7 +44,7 @@ test('anonymous public page is self-contained, with no seeded data, cookie, or p
     assert.equal(response.headers.get('cache-control'), 'no-store');
     assert.equal(response.headers.get('x-robots-tag'), 'noindex');
     const html = await response.text();
-    assert.match(html, /真实结果，只读展示/);
+    assert.match(html, /公开范围：/);
     assert.match(html, /暂无公开结果/);
     assert.doesNotMatch(html, /createWorkspaceClient|localStorage|个人知识花园|周末城市漫游|const seed/);
     assert.doesNotMatch(html, /PRIVATE_OWNER_SENTINEL|fictional-test-token-/);

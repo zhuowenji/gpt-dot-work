@@ -23,7 +23,7 @@ async function harness(fetcher) {
 
 test('public page build is self-contained and independent of owner UI and mock workspace',()=>{
   const html=buildPublicDemo(inputs);
-  assert.match(html,/真实结果，只读展示/);
+  assert.match(html,/公开范围：/);
   assert.doesNotMatch(html,/<script[^>]+src=|<link[^>]+href=|createWorkspaceClient|localStorage|workspace_session|const seed/);
   assert.throws(()=>buildPublicDemo({...inputs,template:'<html></html>'}),/asset markers/);
   assert.match(html,/credentials:'omit'/);
