@@ -100,7 +100,7 @@ async function api(path, options = {}) {
     throw error;
   }
 }
-function label(task) { return task.receipt_state === 'replied' ? '已回复' : '待回复'; }
+function label(task) { if (task.execution_error) return task.execution_error === 'reply_capacity' ? '自动回复容量不足' : '自动回复失败，需处理'; return task.receipt_state === 'replied' ? '已回复' : '待回复'; }
 function hasSummary(task) { return typeof task.summary === 'string' && task.summary.trim().length > 0; }
 function updatedLabel(task) {
   const value = Number(task.updated_at);
@@ -198,6 +198,10 @@ async function openDetail(id, focus = false) {
     const item = document.createElement('div'); item.className = 'record-message ' + (entry.role === 'agent' ? 'is-reply' : '');
     const role = document.createElement('strong'); role.textContent = entry.role === 'agent' ? '所有者回复' : entry.role === 'user' ? '提交的问题' : '接收状态';
     const content = document.createElement('span'); content.textContent = entry.content || ''; item.append(role, content); $('#threadMessages').append(item);
+  }
+  if (data.task.execution_error) {
+    const warning = make('p', 'muted', data.task.execution_error === 'reply_capacity' ? '自动回复未完成：对话容量已满。请让提问者新建对话继续。' : '自动回复未完成。请检查执行连接或手动回复；提问者也可修改仍可编辑的消息后重试。');
+    $('#threadMessages').append(warning);
   }
   $('#category').value = retainedDraft?.category ?? data.task.category ?? ''; $('#summary').value = retainedDraft?.summary ?? data.task.summary ?? ''; $('#reply').value = retainedDraft?.reply || '';
   $('#replyForm').hidden = account.role !== 'owner';

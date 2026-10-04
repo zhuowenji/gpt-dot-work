@@ -323,3 +323,31 @@ test('ordinary frontend accounts retain their own chat but have no admin navigat
   assert.equal(h.run("accountFooter.children.some(node => node.tagName === 'A' && node.href === '/admin/')"),false);
   assert.equal(h.nodes.get('#send').disabled,false);
 });
+
+
+test('visitor terminal execution failures replace waiting text with clear recovery guidance', async () => {
+  const h = await rootHarness(), id = 'a'.repeat(32);
+  h.state.tasks = [{ id, title: 'Question', receipt_state: 'waiting', execution_error: 'lease_retry_exhausted' }];
+  h.state.messages = [{ id: 1, role: 'user', content: 'Question', queued_editable: true }];
+  await h.run(`openTask('${id}')`);
+  assert.match(h.nodes.get('#chatStatus').textContent, /自动回复未完成/);
+  assert.match(h.nodes.get('#messages').textContent, /新建对话重试/);
+  assert.doesNotMatch(h.nodes.get('#messages').textContent, /等待所有者回复|连接器尚未配置/);
+  h.state.tasks[0].execution_error = 'reply_capacity'; await h.run(`openTask('${id}')`);
+  assert.match(h.nodes.get('#chatStatus').textContent, /容量不足/);
+  assert.match(h.nodes.get('#messages').textContent, /容量已满.*新建对话/);
+  delete h.state.tasks[0].execution_error; await h.run(`openTask('${id}')`);
+  assert.match(h.nodes.get('#messages').textContent, /消息已保存，等待回复/);
+  assert.doesNotMatch(h.nodes.get('#messages').textContent, /未能完成/);
+});
+
+test('owner records and detail surface terminal execution failures without losing reply controls', async () => {
+  const h = await adminHarness();
+  h.state.task.execution_error = 'worker_failed'; await h.run('loadRecords()'); await h.run(`openDetail('${h.state.id}')`);
+  assert.match(h.nodes.get('#records').textContent, /自动回复失败，需处理/);
+  assert.match(h.nodes.get('#detailMeta').textContent, /自动回复失败/);
+  assert.match(h.nodes.get('#threadMessages').textContent, /检查执行连接或手动回复/);
+  assert.equal(h.nodes.get('#replyForm').hidden, false);
+  h.state.task.execution_error = 'reply_capacity'; await h.run(`openDetail('${h.state.id}')`);
+  assert.match(h.nodes.get('#threadMessages').textContent, /容量已满/);
+});

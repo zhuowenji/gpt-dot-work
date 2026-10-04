@@ -213,10 +213,11 @@ export class ChatIntake {
     return {
       id: row.id, title: row.title, kind: row.kind, summary: row.summary, category: row.category,
       status: 'queued', pinned: Boolean(row.pinned),
+      ...(this.execution?.threadFailure(row.id) ? { execution_error: this.execution.threadFailure(row.id) } : {}),
       receipt_state: waiting ? 'waiting' : latestReply ? 'replied' : 'received', latest_reply_id: latestReply,
       target_agent_id: null, target_name: null, agent_name: latestReply ? this.config.ownerName || 'Owner' : null,
       created_at: row.created_at / 1000, updated_at: row.updated_at / 1000, revision: row.revision,
-      execution_connected: false, ...(admin ? { identity: row.principal, principal_role: row.principal === 'owner' ? 'owner' : row.principal.startsWith('account:') ? 'account' : 'visitor' } : {}),
+      execution_connected: this.execution?.connectionState().execution_connected || false, ...(admin ? { identity: row.principal, principal_role: row.principal === 'owner' ? 'owner' : row.principal.startsWith('account:') ? 'account' : 'visitor' } : {}),
     };
   }
 
@@ -224,7 +225,7 @@ export class ChatIntake {
     const messages = this.db.prepare('SELECT * FROM chat_messages WHERE thread_id = ? AND deleted_at IS NULL ORDER BY id').all(row.id).map(message => ({
       id: message.id, role: message.role, content: message.content, attachments: [],
       agent_name: message.role === 'agent' ? this.config.ownerName || 'Owner' : null, target_name: null,
-      queued_editable: message.role === 'user' && Boolean(message.editable), queue_position: message.queue_position,
+      queued_editable: message.role === 'user' && Boolean(message.editable) && !this.execution?.isMessageLeased(message.id), queue_position: message.queue_position,
       retry_job_id: null, created_at: message.created_at / 1000, updated_at: message.updated_at / 1000,
     }));
     return { task: this.taskDto(row, admin), messages };
@@ -247,11 +248,13 @@ export class ChatIntake {
   }
 
   insertMessage(row, text, role, author) {
+    if (role === 'user') this.execution?.reserveReplyCapacity(row, Buffer.byteLength(text));
     this.quota(row.principal, Buffer.byteLength(text), row.id);
     const at = this.store.now();
     const position = this.db.prepare('SELECT COALESCE(MAX(queue_position), 0) + 1 AS n FROM chat_messages WHERE thread_id = ?').get(row.id).n;
     const result = this.db.prepare('INSERT INTO chat_messages(thread_id, role, author, content, content_bytes, created_at, updated_at, editable, queue_position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(row.id, role, author, text, Buffer.byteLength(text), at, at, role === 'user' ? 1 : 0, position);
     this.bump(row.id);
+    if (role === 'user') { this.execution?.enqueueMessage(row, Number(result.lastInsertRowid)); this.execution?.notifyReady(); }
     return Number(result.lastInsertRowid);
   }
 
@@ -260,6 +263,7 @@ export class ChatIntake {
   mutableMessage(row, id, principal) {
     const message = this.db.prepare('SELECT * FROM chat_messages WHERE id = ? AND thread_id = ? AND author = ? AND deleted_at IS NULL').get(id, row.id, principal);
     if (!message) throw notFound();
+    if (this.execution?.isMessageLeased(message.id)) throw new ApiError(409, 'message_processing', 'This message is currently being answered; send a follow-up instead');
     if (message.role !== 'user' || !message.editable) throw new ApiError(409, 'message_already_reviewed', 'Only an unanswered intake message can be edited or withdrawn');
     return message;
   }
@@ -277,7 +281,7 @@ export class ChatIntake {
     if (req.method === 'GET' && path === '/api/chat/me') {
       if (!session) session = this.createGuest(req, res, client);
       if (session.role !== 'owner') this.rate([[`read:${session.principal}`, CHAT_LIMITS.readsPerVisitor], [`read-ip:${digest(client)}`, CHAT_LIMITS.readsPerIp]]);
-      send(res, 200, { role: session.role, identity: session.principal, ...(session.username ? { username: session.username } : {}), ip: client, csrfToken: session.csrfToken, expiresAt: session.expiresAt, intake_enabled: true, execution_connected: false, uploads_enabled: false, max_upload_bytes: 0 });
+      send(res, 200, { role: session.role, identity: session.principal, ...(session.username ? { username: session.username } : {}), ip: client, csrfToken: session.csrfToken, expiresAt: session.expiresAt, intake_enabled: true, execution_connected: this.execution?.connectionState().execution_connected || false, uploads_enabled: false, max_upload_bytes: 0 });
       return true;
     }
     if (!session) throw new ApiError(401, 'chat_session_required', 'Initialize or refresh your chat identity before continuing');
@@ -338,7 +342,7 @@ export class ChatIntake {
         const id = randomBytes(16).toString('hex'), at = this.store.now();
         this.db.prepare('INSERT INTO chat_threads(id, principal, kind, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)').run(id, session.principal, session.role === 'owner' ? 'owner_instruction' : 'visitor_question', [...text.replace(/\s+/g, ' ')].slice(0, 80).join(''), at, at);
         this.insertMessage(this.thread(id, session.principal), text, 'user', session.principal);
-        return { id, received: true, execution_connected: false };
+        return { id, received: true, execution_connected: this.execution?.connectionState().execution_connected || false };
       }
       const [, id, action, rawMessageId] = match;
       const row = this.thread(id, session.principal, admin);
@@ -363,7 +367,7 @@ export class ChatIntake {
         const messageId = this.insertMessage(row, text, 'agent', 'owner');
         this.db.prepare('UPDATE chat_messages SET editable = 0 WHERE thread_id = ? AND role = ?').run(id, 'user');
         if (body.context !== undefined) this.context.writeback(id, body.context, { actor: 'owner', sourceMessageIds: [messageId] });
-        return { id: messageId, task_id: id, replied: true, execution_connected: false };
+        return { id: messageId, task_id: id, replied: true, execution_connected: this.execution?.connectionState().execution_connected || false };
       }
       if (action === 'metadata') {
         fields(body, ['summary', 'category']);
@@ -379,7 +383,7 @@ export class ChatIntake {
       }
       if (action === 'messages' && !rawMessageId) {
         const messageId = this.insertMessage(row, submission(body), 'user', session.principal);
-        return { id: messageId, task_id: id, received: true, execution_connected: false };
+        return { id: messageId, task_id: id, received: true, execution_connected: this.execution?.connectionState().execution_connected || false };
       }
       if (action === 'messages') {
         const messageId = Number(rawMessageId);
@@ -388,6 +392,7 @@ export class ChatIntake {
         if (req.method === 'PATCH') {
           fields(body, ['content']);
           const text = content(body.content);
+          this.execution?.reserveEditCapacity(row, Buffer.byteLength(text) - message.content_bytes);
           this.quota(row.principal, Buffer.byteLength(text) - message.content_bytes, null, false);
           this.db.prepare('UPDATE chat_messages SET content = ?, content_bytes = ?, updated_at = ? WHERE id = ? AND thread_id = ? AND author = ?').run(text, Buffer.byteLength(text), this.store.now(), messageId, id, session.principal);
         } else {
@@ -396,14 +401,17 @@ export class ChatIntake {
         }
         this.context.invalidateSources(id, [messageId], `user:${session.principal}`);
         this.bump(id);
+        if (req.method === 'PATCH') this.execution?.messageChanged(messageId);
         return { id: messageId, ...(req.method === 'PATCH' ? { updated: true } : { deleted: true }) };
       }
+      if (this.execution?.threadLeased(id)) throw new ApiError(409, 'message_processing', 'Wait for the current reply before reordering this conversation');
       fields(body, ['message_ids']);
       if (!Array.isArray(body.message_ids) || body.message_ids.length > CHAT_LIMITS.messagesPerThread || body.message_ids.some(id => !Number.isSafeInteger(id) || id < 1) || new Set(body.message_ids).size !== body.message_ids.length) throw new ApiError(400, 'invalid_input', 'message_ids must be a list of distinct positive integer IDs');
       const current = this.db.prepare("SELECT id FROM chat_messages WHERE thread_id = ? AND author = ? AND role = 'user' AND editable = 1 AND deleted_at IS NULL").all(id, session.principal).map(message => message.id);
       if (current.length !== body.message_ids.length || current.some(id => !body.message_ids.includes(id))) throw new ApiError(409, 'queue_changed', 'Reload and provide all current unanswered message IDs');
       body.message_ids.forEach((messageId, index) => this.db.prepare('UPDATE chat_messages SET queue_position = ? WHERE id = ? AND thread_id = ? AND author = ?').run(index + 1, messageId, id, session.principal));
       this.bump(id);
+      this.execution?.notifyReady();
       return { id, message_ids: body.message_ids };
     });
     send(res, req.method === 'POST' && (path === `${prefix}/tasks` || match?.[2] === 'messages' || match?.[2] === 'replies') ? 201 : 200, result);

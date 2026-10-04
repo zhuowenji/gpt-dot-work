@@ -295,3 +295,11 @@ Legacy machine callers can still use distinct `WORKSPACE_API_TOKEN` and
 `WORKSPACE_APPROVAL_TOKEN` bearer credentials. These are optional in owner mode.
 A normal API bearer token alone never approves tasks. Never paste either bearer
 credential into the browser, localStorage, source code, or client configuration.
+
+## Optional managed-Site chat execution bridge
+
+The additive [managed task API](../docs/MANAGED_TASK_API.md) is disabled until an
+explicitly approved public-key registration and callback configuration exist.
+It serves only task-derived chat context and atomic reply/summary/memory writes;
+it does not grant owner tools or implement custom OAuth. Local tests do not imply
+a live connection. The existing runtime and other services remain independent.

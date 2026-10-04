@@ -11,7 +11,7 @@
     "api": "node server.mjs",
     "worker": "node worker.mjs",
     "test": "node --test test/*.test.mjs",
-    "check": "node --check chat.mjs && node --check chat-auth.mjs && node --check chat-context.mjs && node --check config.mjs && node --check auth.mjs && node --check workspace.mjs && node --check videos.mjs && node --check store.mjs && node --check server.mjs && node --check worker.mjs && node --check service.mjs && node --check password-hash.mjs && node --check revoke-sessions.mjs && npm test",
+    "check": "node --check managed-bridge-auth.mjs && node --check managed-bridge.mjs && node --check managed-bridge-events.mjs && node --check managed-bridge-revoke.mjs && node --check chat.mjs && node --check chat-auth.mjs && node --check chat-context.mjs && node --check config.mjs && node --check auth.mjs && node --check workspace.mjs && node --check videos.mjs && node --check store.mjs && node --check server.mjs && node --check worker.mjs && node --check service.mjs && node --check password-hash.mjs && node --check revoke-sessions.mjs && npm test",
     "password-hash": "node password-hash.mjs",
     "revoke-sessions": "node revoke-sessions.mjs"
   },

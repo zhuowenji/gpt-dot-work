@@ -271,7 +271,13 @@ function newTask(navigate = true) {
   restoreDraft(); showWelcome(); clearError(); updateComposer(); input.focus();
   renderList().catch(showError);
 }
+function executionNotice(task) {
+  if (!task.execution_error) return '消息已保存，等待回复。';
+  if (task.execution_error === 'reply_capacity') return '这段对话容量已满，自动回复未能完成。请新建对话继续。';
+  return '自动回复未能完成。你可以新建对话重试；仍可编辑的排队消息，修改后会重新排队。';
+}
 function taskLabel(task) {
+  if (task.execution_error) return task.execution_error === 'reply_capacity' ? '自动回复受限：容量不足' : '自动回复未完成，可重试';
   return task.receipt_state === 'replied' ? '已收到所有者回复' : '已收到，等待所有者回复';
 }
 function markRead(id, replyId) {
@@ -421,8 +427,8 @@ async function openTask(id, scrollToBottom = false, navigate = true) {
   }
   for (const entry of followups.sort((a,b) => (a.queue_position ?? a.id) - (b.queue_position ?? b.id) || a.id - b.id)) renderQueueCard(entry, id);
   queuedMessages.hidden = queuedMessages.childElementCount === 0;
-  if (data.task.receipt_state !== 'replied') {
-    const waiting = document.createElement('div'); waiting.className = 'waiting'; waiting.textContent = '消息已保存，等待所有者回复。执行连接器尚未配置。'; messages.append(waiting);
+  if (data.task.execution_error || data.task.receipt_state !== 'replied') {
+    const waiting = document.createElement('div'); waiting.className = 'waiting'; waiting.textContent = executionNotice(data.task); messages.append(waiting);
   }
   updateComposer();
   messages.scrollTop = scrollToBottom || switching || (hasNewContent && nearBottom) ? messages.scrollHeight : scrollTop;

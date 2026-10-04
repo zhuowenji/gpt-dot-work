@@ -3,6 +3,7 @@ import { join, isAbsolute, resolve, dirname, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { existsSync, realpathSync, statSync } from 'node:fs';
 import { parsePasswordHash, parseTrustedProxies } from './auth.mjs';
+import { parseBridgeRegistration } from './managed-bridge-auth.mjs';
 
 const repository = resolve(fileURLToPath(new URL('..', import.meta.url)));
 function integer(env, name, fallback, minimum, maximum) {
@@ -68,6 +69,9 @@ export function readConfig(env = process.env, { requireApiToken = true } = {}) {
   const sessionIdleMs = integer(env, 'WORKSPACE_SESSION_IDLE_SECONDS', 3600, 60, 86400) * 1000;
   if (sessionIdleMs > sessionTtlMs) throw new Error('Session idle timeout cannot exceed absolute session lifetime');
   return {
+    managedBridgeRegistration: parseBridgeRegistration(env.GDW_MANAGED_BRIDGE_REGISTRATION),
+    managedBridgeEventsEnabled: env.GDW_MANAGED_BRIDGE_EVENTS_ENABLED === 'true',
+    managedBridgeCallbackOrigins: (env.GDW_MANAGED_BRIDGE_CALLBACK_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
     apiToken, approvalToken, runtime, dbPath, allowedOrigin, publicOrigin, production, releaseId,
     ownerPasswordHash, ownerName, staticDir, sessionTtlMs, sessionIdleMs, trustedProxyIPs,
     host,

@@ -119,16 +119,16 @@ export class ChatContextStore {
     const row = this.thread(threadId);
     return this.memoryRows(row.principal).filter(entry => includeInactive || entry.status === 'active' && this.liveSources(row.principal, entry.source_snapshots)).map(entry => this.memoryDto(entry));
   }
-  getContext(threadId, { query = '', beforeMessageId } = {}) {
+  getContext(threadId, { query = '', beforeMessageId, messageIds } = {}) {
     const standalone = !this.db.isTransaction;
     if (standalone) this.db.exec('BEGIN');
     try {
-      const result = this.readContext(threadId, { query, beforeMessageId });
+      const result = this.readContext(threadId, { query, beforeMessageId, messageIds });
       if (standalone) this.db.exec('COMMIT');
       return result;
     } catch (error) { if (standalone) this.db.exec('ROLLBACK'); throw error; }
   }
-  readContext(threadId, { query = '', beforeMessageId } = {}) {
+  readContext(threadId, { query = '', beforeMessageId, messageIds } = {}) {
     const row = this.thread(threadId);
     query = text(query, CONTEXT_LIMITS.queryCharacters, 'query', true);
     if (beforeMessageId !== undefined && (!Number.isSafeInteger(beforeMessageId) || beforeMessageId < 1)) fail('invalid_context', 'beforeMessageId must be a positive message ID');
@@ -136,7 +136,11 @@ export class ChatContextStore {
       const source = this.db.prepare('SELECT id FROM chat_messages WHERE id = ? AND thread_id = ? AND deleted_at IS NULL').get(beforeMessageId, threadId);
       if (!source) fail('invalid_source', 'Context message must belong to the authorized conversation');
     }
-    const selected = this.db.prepare('SELECT id, role, content, created_at, updated_at FROM chat_messages WHERE thread_id = ? AND deleted_at IS NULL AND id <= ? ORDER BY id DESC LIMIT ?').all(threadId, beforeMessageId ?? Number.MAX_SAFE_INTEGER, CONTEXT_LIMITS.messages);
+    // Internal leased execution can exclude still-queued messages after a user
+    // reorders them. No public context endpoint accepts this filter or a user ID.
+    if (messageIds !== undefined && (!Array.isArray(messageIds) || !messageIds.length || messageIds.length > 200 || messageIds.some(id => !Number.isSafeInteger(id) || id < 1) || new Set(messageIds).size !== messageIds.length)) fail('invalid_context', 'messageIds must contain at most 200 distinct positive IDs');
+    if (messageIds !== undefined && this.db.prepare(`SELECT COUNT(*) AS n FROM chat_messages WHERE thread_id = ? AND deleted_at IS NULL AND id IN (${messageIds.map(() => '?').join(',')})`).get(threadId, ...messageIds).n !== messageIds.length) fail('invalid_source', 'Every selected message must belong to the authorized conversation');
+    const selected = this.db.prepare(`SELECT id, role, content, created_at, updated_at FROM chat_messages WHERE thread_id = ? AND deleted_at IS NULL AND id <= ? ${messageIds ? `AND id IN (${messageIds.map(() => '?').join(',')})` : ''} ORDER BY id DESC LIMIT ?`).all(threadId, beforeMessageId ?? Number.MAX_SAFE_INTEGER, ...(messageIds || []), CONTEXT_LIMITS.messages);
     const words = terms(query || selected.find(message => message.role === 'user')?.content.slice(0, CONTEXT_LIMITS.queryCharacters) || row.title);
     let remaining = CONTEXT_LIMITS.messageBudget;
     const messages = selected.flatMap(message => {

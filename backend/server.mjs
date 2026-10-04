@@ -7,6 +7,7 @@ import { OwnerAuth, constantEqual } from './auth.mjs';
 import { WorkspaceStore, MAX_WORKSPACE_BYTES } from './workspace.mjs';
 import { VideoStore } from './videos.mjs';
 import { ChatIntake } from './chat.mjs';
+import { ManagedBridgeApi } from './managed-bridge.mjs';
 import { pathToFileURL } from 'node:url';
 import { TaskStore, ApiError, TASK_STATES } from './store.mjs';
 import { readConfig } from './config.mjs';
@@ -92,6 +93,7 @@ export function createApiServer(store, config) {
   const workspace = new WorkspaceStore(store);
   const videos = new VideoStore(store);
   const chat = new ChatIntake(store, config, auth);
+  const bridge = new ManagedBridgeApi(store, config, chat);
   const server = createServer(async (req, res) => {
     const requestStartedAt = performance.now();
     res.setHeader('X-Frame-Options', 'DENY');
@@ -132,6 +134,7 @@ export function createApiServer(store, config) {
           return writeHead.call(this, statusCode, ...args);
         };
       }
+      if (await bridge.handle(req, res, url)) return;
       const session = auth.session(req);
       if (await chat.handle(req, res, url, session)) return;
       if (req.method === 'GET' && url.pathname === '/api/session') { send(res, 200, auth.describe(session)); return; }
@@ -207,10 +210,13 @@ export function createApiServer(store, config) {
       throw new ApiError(404, 'not_found', 'Endpoint not found');
     } catch (error) {
       if (error instanceof ApiError && error.status === 429) res.setHeader('Retry-After', error.code === 'login_busy' ? '1' : '900');
-      if (!res.headersSent) send(res, error instanceof ApiError ? error.status : 500, { error: { code: error instanceof ApiError ? error.code : 'internal_error', message: error instanceof ApiError ? error.message : 'The request could not be completed' } });
+      if (!res.headersSent) send(res, error instanceof ApiError ? error.status : 500, { error: { code: error instanceof ApiError ? error.code : 'internal_error', message: error instanceof ApiError ? error.message : 'The request could not be completed', ...(error instanceof ApiError && error.code === 'callback_origin_not_allowed' && typeof error.origin === 'string' ? { origin: error.origin } : {}) } });
       else res.end();
     }
   });
+  server.managedBridge = bridge;
+  server.once('listening', () => bridge.start());
+  server.once('close', () => { void bridge.stop(); });
   server.requestTimeout = 15000;
   server.headersTimeout = 10000;
   return server;
@@ -228,7 +234,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   const server = createApiServer(store, config);
   const address = await listen(server, config);
   process.stdout.write(`Task API listening on ${config.host}:${address.port}. Runtime: ${config.runtime}.\n`);
-  const shutdown = () => server.close(() => store.close());
+  const shutdown = async () => { await server.managedBridge.stop(); server.close(() => store.close()); };
   process.once('SIGINT', shutdown);
   process.once('SIGTERM', shutdown);
 }

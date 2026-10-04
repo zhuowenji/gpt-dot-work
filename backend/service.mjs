@@ -15,7 +15,7 @@ let stopping = false;
 async function shutdown() {
   if (stopping) return;
   stopping = true;
-  await Promise.all([worker.stop(), new Promise(resolve => server.close(resolve))]);
+  await Promise.all([server.managedBridge.stop(), worker.stop(), new Promise(resolve => server.close(resolve))]);
   store.close();
 }
 process.once('SIGINT', shutdown);
