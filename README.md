@@ -2,10 +2,11 @@
 
 [![Verify source](https://github.com/zhuowenji/gpt-dot-work/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/zhuowenji/gpt-dot-work/actions/workflows/ci.yml)
 [![GitHub Stars](https://img.shields.io/github/stars/zhuowenji/gpt-dot-work?style=flat)](https://github.com/zhuowenji/gpt-dot-work/stargazers)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 [在线访问](https://dot.075900.vip/) · [只读选品结果](https://dot.075900.vip/demo/)
 
-在线站点版本以实际部署为准；本说明中的公开问答、可选账号和只读结果页须完成本版本部署后验证。本地测试通过不代表新版本已经上线。
+最近验证的线上版本为 `872a551`（2026-10-04）：前台/记忆模块已发布，有限十访客收件、隔离与幂等检查通过；真实 dot/OAuth/事件回复链路仍未接通验收。后续版本以实际部署为准。详见[架构与边界](docs/ARCHITECTURE.md)及[交付验收记录](docs/DELIVERY_ACCEPTANCE.md)。
 
 一个可自行部署的中文任务与问答入口：前台负责收集需求和继续对话，后台负责查看记录、回复、归类和保存摘要。前台保留原「任务聊天」页面的主要布局，并统一日夜主题。
 
@@ -32,7 +33,7 @@
 - 访客、不同普通账号和所有者之间的数据隔离；私有内容不会成为公开列表。
 - 可选注册、登录、退出；密码只保存加盐 scrypt hash，登录限速、Cookie 会话和 CSRF/Origin 检查。
 - 所有者可以在记录页实际回复，回复会出现在对应的原始对话中。
-- 摘要和分类是明确保存的整理结果，当前没有后台模型自动生成长期记忆的承诺。
+- 摘要和分类来自明确保存的整理结果；用户记忆支持版本、来源、纠错和失效。模块已发布，真实 AI 采用记忆的链路尚未验收，也不会自动把每条消息当作事实。
 - 上传附件暂未开放。原页面的附件控件会说明这一限制，不会偷偷上传文件。
 - 没有已接通的 AI 执行器，没有无凭证 Agent 注册/领取接口；访客问题绝不是任意操作的授权。
 - MCP/OAuth/事件连接即使有候选代码，也只有在完成明确授权、安装连接和端到端测试后才能称为可用。
