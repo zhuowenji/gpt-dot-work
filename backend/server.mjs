@@ -8,6 +8,7 @@ import { WorkspaceStore, MAX_WORKSPACE_BYTES } from './workspace.mjs';
 import { VideoStore } from './videos.mjs';
 import { ChatIntake } from './chat.mjs';
 import { ManagedBridgeApi } from './managed-bridge.mjs';
+import { CALLBACK_FAILURE_REASONS } from './managed-bridge-events.mjs';
 import { pathToFileURL } from 'node:url';
 import { TaskStore, ApiError, TASK_STATES } from './store.mjs';
 import { readConfig } from './config.mjs';
@@ -210,7 +211,12 @@ export function createApiServer(store, config) {
       throw new ApiError(404, 'not_found', 'Endpoint not found');
     } catch (error) {
       if (error instanceof ApiError && error.status === 429) res.setHeader('Retry-After', error.code === 'login_busy' ? '1' : '900');
-      if (!res.headersSent) send(res, error instanceof ApiError ? error.status : 500, { error: { code: error instanceof ApiError ? error.code : 'internal_error', message: error instanceof ApiError ? error.message : 'The request could not be completed', ...(error instanceof ApiError && error.code === 'callback_origin_not_allowed' && typeof error.origin === 'string' ? { origin: error.origin } : {}) } });
+      if (!res.headersSent) send(res, error instanceof ApiError ? error.status : 500, { error: {
+        code: error instanceof ApiError ? error.code : 'internal_error',
+        message: error instanceof ApiError ? error.message : 'The request could not be completed',
+        ...(error instanceof ApiError && error.code === 'callback_origin_not_allowed' && typeof error.origin === 'string' ? { origin: error.origin } : {}),
+        ...(error instanceof ApiError && error.code === 'callback_verification_failed' && CALLBACK_FAILURE_REASONS.includes(error.reason) ? { reason: error.reason } : {}),
+      } });
       else res.end();
     }
   });

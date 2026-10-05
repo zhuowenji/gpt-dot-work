@@ -2,13 +2,14 @@ import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto
 import { lookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
+import { performance } from 'node:perf_hooks';
 import { ApiError } from './store.mjs';
 
 // No startup side effects: no dispatcher, credential generation or network request.
 export const EVENT_LIMITS = Object.freeze({
   subscriptions: 32, events: 100000, deliveries: 200000,
   maxAttempts: 8, maxAgeMs: 86400000, deliveryLeaseMs: 30000,
-  requestTimeoutMs: 10000, dnsTimeoutMs: 3000, maxLeaseMs: 86400000,
+  requestTimeoutMs: 10000, dnsTimeoutMs: 3000, connectTimeoutMs: 3000, maxLeaseMs: 86400000,
   verificationCacheMs: 300000, rotationMs: 300000, minimumLeaseMs: 1000,
   inFlight: 8,
 });
@@ -88,12 +89,56 @@ export function standardWebhookHeaders(secret, eventId, body, at) {
   return { 'webhook-id': eventId, 'webhook-timestamp': timestamp, 'webhook-signature': `v1,${signature}` };
 }
 
-async function withDeadline(promise, milliseconds, signal) {
+// Only these bounded reasons cross an API or durable diagnostic boundary.
+export const CALLBACK_FAILURE_REASONS = Object.freeze([
+  'dns_error', 'dns_timeout', 'connect_error', 'connect_timeout', 'tls_error',
+  'http_error', 'challenge_mismatch', 'response_invalid', 'request_timeout',
+  'cancelled', 'transport_error',
+]);
+class CallbackFailure extends Error {
+  constructor(reason, retryableConnection = false) {
+    super(`Callback failed: ${reason}`);
+    this.reason = reason; this.retryableConnection = retryableConnection;
+  }
+}
+function failureReason(error) {
+  return error instanceof CallbackFailure && CALLBACK_FAILURE_REASONS.includes(error.reason) ? error.reason : 'transport_error';
+}
+function verificationFailed(reason) {
+  const safeReason = CALLBACK_FAILURE_REASONS.includes(reason) ? reason : 'transport_error';
+  const error = new ApiError(400, 'callback_verification_failed', `The callback challenge was not verified (${safeReason})`);
+  error.reason = safeReason;
+  return error;
+}
+function cancelled(signal) {
+  return new CallbackFailure(signal?.reason instanceof CallbackFailure ? failureReason(signal.reason) : 'cancelled');
+}
+function httpStatus(value) {
+  return Number.isInteger(value) && value >= 100 && value <= 599 ? value : null;
+}
+function transportFailure(error, connected, tlsReady) {
+  if (error instanceof CallbackFailure) return error;
+  // Inspect codes only, never messages, causes, response bodies, or request data.
+  const code = typeof error?.code === 'string' ? error.code : '';
+  if (code.startsWith('ERR_TLS_') || code.startsWith('ERR_SSL_') || [
+    'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_REVOKED', 'CERT_SIGNATURE_FAILURE',
+    'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+    'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'INVALID_CA', 'CERT_UNTRUSTED',
+  ].includes(code) || (connected && !tlsReady)) return new CallbackFailure('tls_error');
+  // Retry only a known failure before TCP connects, when no HTTP bytes can
+  // have been transmitted. TLS, response, or ambiguous failures never fail over.
+  if (!connected && ['ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'EADDRNOTAVAIL', 'ECONNRESET', 'ETIMEDOUT'].includes(code)) {
+    return new CallbackFailure(code === 'ETIMEDOUT' ? 'connect_timeout' : 'connect_error', true);
+  }
+  return new CallbackFailure('transport_error');
+}
+
+async function withDeadline(promise, milliseconds, signal, reason = 'request_timeout') {
   let timer, abort;
   try {
     return await Promise.race([promise, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error('callback_timeout')), milliseconds);
-      abort = () => reject(new Error('callback_cancelled'));
+      timer = setTimeout(() => reject(new CallbackFailure(reason)), milliseconds);
+      abort = () => reject(cancelled(signal));
       signal?.addEventListener('abort', abort, { once: true });
       if (signal?.aborted) abort();
     })]);
@@ -103,33 +148,45 @@ async function withDeadline(promise, milliseconds, signal) {
   }
 }
 
-// The request has its own vetted, pinned DNS result. Redirects and proxies are
-// never consulted, and TLS still verifies the original hostname normally.
-export function pinnedHttpsTransport({ url, address, headers, body, signal, timeoutMs, readResponse = false }) {
+// Exactly one vetted address per HTTPS request. The URL, Host and TLS SNI
+// retain the original hostname; no redirects, proxies or TLS exceptions.
+export function pinnedHttpsTransport({ url, address, headers, body, signal, timeoutMs, connectTimeoutMs = timeoutMs, readResponse = false }) {
   return new Promise((resolve, reject) => {
-    const req = httpsRequest(url, {
-      method: 'POST', agent: false, signal, timeout: timeoutMs,
-      family: address.family, servername: url.hostname,
-      lookup: (_hostname, options, callback) => callback(null,
-        options.all ? [address] : address.address, ...(options.all ? [] : [address.family])),
-      headers: { ...headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
-    }, response => {
-      const status = response.statusCode;
-      if (!readResponse || status < 200 || status >= 300) {
-        response.destroy(); resolve({ status }); return;
-      }
-      let size = 0; const chunks = [];
-      response.on('data', chunk => {
-        size += chunk.length;
-        if (size > 4096) { response.destroy(); reject(new Error('callback_response_too_large')); }
-        else chunks.push(chunk);
+    let connected = false, tlsReady = false, connectTimer, req;
+    const fail = error => { clearTimeout(connectTimer); reject(signal?.aborted ? cancelled(signal) : transportFailure(error, connected, tlsReady)); };
+    const done = result => { clearTimeout(connectTimer); resolve(result); };
+    try {
+      req = httpsRequest(url, {
+        method: 'POST', agent: false, signal, timeout: timeoutMs,
+        family: address.family, servername: url.hostname,
+        rejectUnauthorized: true, autoSelectFamily: false,
+        lookup: (_hostname, options, callback) => callback(null,
+          options.all ? [address] : address.address, ...(options.all ? [] : [address.family])),
+        headers: { ...headers, 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) },
+      }, response => {
+        const status = httpStatus(response.statusCode);
+        if (!status) { response.destroy(); fail(new CallbackFailure('response_invalid')); return; }
+        if (!readResponse || status < 200 || status >= 300) {
+          response.destroy(); done({ status }); return;
+        }
+        let size = 0; const chunks = [];
+        response.on('data', chunk => {
+          size += chunk.length;
+          if (size > 4096) { response.destroy(); fail(new CallbackFailure('response_invalid')); }
+          else chunks.push(chunk);
+        });
+        response.once('error', fail);
+        response.once('end', () => done({ status, body: Buffer.concat(chunks).toString('utf8') }));
       });
-      response.once('error', reject);
-      response.once('end', () => resolve({ status, body: Buffer.concat(chunks).toString('utf8') }));
-    });
-    req.once('error', reject);
-    req.once('timeout', () => req.destroy(new Error('callback_timeout')));
-    req.end(body);
+      req.once('socket', socket => {
+        socket.once('connect', () => { connected = true; clearTimeout(connectTimer); });
+        socket.once('secureConnect', () => { tlsReady = true; });
+      });
+      req.once('error', fail);
+      req.once('timeout', () => req.destroy(new CallbackFailure(connected ? 'request_timeout' : 'connect_timeout', !connected)));
+      connectTimer = setTimeout(() => req.destroy(new CallbackFailure('connect_timeout', true)), connectTimeoutMs);
+      req.end(body);
+    } catch (error) { fail(error); }
   });
 }
 
@@ -275,23 +332,60 @@ export class ManagedBridgeEvents {
     const controller = new AbortController();
     const allowed = () => !this.closed && this.active(registration) && this.now() < expiresAt && valid();
     const operation = { controller, valid: allowed }; this.inFlight.add(operation);
-    const abort = () => controller.abort();
-    const timeout = setTimeout(abort, EVENT_LIMITS.requestTimeoutMs);
-    const expiry = setTimeout(abort, Math.max(1, Math.min(EVENT_LIMITS.requestTimeoutMs, expiresAt - this.now())));
-    const revocations = setInterval(() => { if (!allowed()) abort(); }, 50);
+    const abort = reason => controller.abort(new CallbackFailure(reason));
+    const deadline = performance.now() + EVENT_LIMITS.requestTimeoutMs;
+    const remaining = () => Math.max(0, deadline - performance.now());
+    const check = () => {
+      if (controller.signal.aborted) throw cancelled(controller.signal);
+      if (!allowed()) throw new CallbackFailure('cancelled');
+      if (remaining() <= 0) throw new CallbackFailure('request_timeout');
+    };
+    const timeout = setTimeout(() => abort('request_timeout'), EVENT_LIMITS.requestTimeoutMs);
+    const expiry = setTimeout(() => abort('cancelled'), Math.max(1, Math.min(2147483647, expiresAt - this.now())));
+    const revocations = setInterval(() => { if (!allowed()) abort('cancelled'); }, 50);
     try {
-      if (!allowed()) throw new Error('callback_cancelled');
+      check();
       const target = validateCallbackUrl(url, this.allowedOrigins);
-      const addresses = await withDeadline(Promise.resolve(this.resolver(target.hostname)), EVENT_LIMITS.dnsTimeoutMs, controller.signal);
-      if (!Array.isArray(addresses) || !addresses.length || addresses.length > 64 || addresses.some(answer => !object(answer)
+      let answers;
+      try {
+        answers = await withDeadline(Promise.resolve().then(() => this.resolver(target.hostname)), Math.min(EVENT_LIMITS.dnsTimeoutMs, remaining()), controller.signal, 'dns_timeout');
+      } catch (error) {
+        if (error instanceof CallbackFailure) throw error;
+        throw new CallbackFailure('dns_error');
+      }
+      if (!Array.isArray(answers) || !answers.length || answers.length > 64 || answers.some(answer => !object(answer)
         || ![4, 6].includes(answer.family) || isIP(answer.address) !== answer.family || !isPublicAddress(answer.address))) throw blockedDestination();
-      // Recheck after the asynchronous DNS boundary, before transmitting bytes.
-      if (controller.signal.aborted || !allowed()) throw new Error('callback_cancelled');
+      // Snapshot and deduplicate only after validating ALL same-call answers.
+      // No re-resolution, alternate resolver, caller IP override, or private subset.
+      const addresses = [...new Map(answers.map(({ address, family }) => [`${family}:${address}`, Object.freeze({ address, family })])).values()];
+      check();
       const headers = standardWebhookHeaders(secret, eventId, body, this.now());
       if (oldSecret) headers['webhook-signature'] += ` ${standardWebhookHeaders(oldSecret, eventId, body, Number(headers['webhook-timestamp']) * 1000)['webhook-signature']}`;
       headers['X-MCP-Subscription-Id'] = subscriptionId;
       headers['Content-Type'] = 'application/json';
-      return await withDeadline(Promise.resolve(this.transport({ url: target, address: addresses[0], headers, body, signal: controller.signal, timeoutMs: EVENT_LIMITS.requestTimeoutMs, readResponse })), EVENT_LIMITS.requestTimeoutMs, controller.signal);
+      for (const [index, address] of addresses.entries()) {
+        // Recheck revocation, expiry and the shared deadline before every socket.
+        check();
+        const attemptController = new AbortController();
+        const cancelAttempt = () => attemptController.abort(controller.signal.reason);
+        controller.signal.addEventListener('abort', cancelAttempt, { once: true });
+        try {
+          const timeoutMs = Math.max(1, Math.floor(remaining()));
+          const connectTimeoutMs = Math.min(EVENT_LIMITS.connectTimeoutMs, Math.max(1, Math.floor(timeoutMs / (addresses.length - index))));
+          const result = await withDeadline(Promise.resolve(this.transport({ url: target, address, headers, body,
+            signal: attemptController.signal, timeoutMs, connectTimeoutMs, readResponse })), timeoutMs, controller.signal);
+          check();
+          return result;
+        } catch (error) {
+          check();
+          if (!(error instanceof CallbackFailure && error.retryableConnection) || index === addresses.length - 1) {
+            throw new CallbackFailure(failureReason(error));
+          }
+        } finally {
+          controller.signal.removeEventListener('abort', cancelAttempt);
+          attemptController.abort();
+        }
+      }
     } finally {
       clearTimeout(timeout); clearTimeout(expiry); clearInterval(revocations);
       controller.abort(); this.inFlight.delete(operation);
@@ -320,12 +414,13 @@ export class ManagedBridgeEvents {
           eventId, body: JSON.stringify({ type: 'verification', challenge }), expiresAt: input.expiresAt, valid: current, readResponse: true });
       } catch (error) {
         if (error.code === 'callback_destination_denied' || error.code === 'callback_origin_not_allowed') throw error;
-        throw new ApiError(400, 'callback_verification_failed', 'The callback challenge was not verified');
+        throw verificationFailed(failureReason(error));
       }
+      if (!(httpStatus(response.status) >= 200 && httpStatus(response.status) < 300)) throw verificationFailed('http_error');
       let echoed;
       try { echoed = JSON.parse(response.body)?.challenge; } catch { /* invalid response */ }
       const expected = Buffer.from(challenge), received = typeof echoed === 'string' ? Buffer.from(echoed) : Buffer.alloc(0);
-      if (!(response.status >= 200 && response.status < 300) || received.length !== expected.length || !timingSafeEqual(expected, received)) throw new ApiError(400, 'callback_verification_failed', 'The callback challenge was not verified');
+      if (received.length !== expected.length || !timingSafeEqual(expected, received)) throw verificationFailed('challenge_mismatch');
     }
     const result = this.atomic(() => {
       this.requireActive(registration);
@@ -408,15 +503,16 @@ export class ManagedBridgeEvents {
     const claim = this.claim();
     if (!claim) return null;
     const subscription = claim.subscription;
-    let status = null, code = 'transport_error';
+    let status = null, code = 'callback_transport_error';
     try {
       const result = await this.callback({ registration: this.rowRegistration(subscription), subscriptionId: subscription.id,
         url: subscription.callback_url, secret: subscription.secret,
         oldSecret: subscription.old_secret_until > this.now() ? subscription.old_secret : null,
         eventId: claim.event_id, body: claim.body, expiresAt: claim.leaseUntil, valid: () => this.leaseActive(claim) });
-      status = Number.isInteger(result.status) ? result.status : null;
-      code = status ? `http_${status}` : 'transport_error';
+      status = httpStatus(result.status);
+      code = status ? `http_${status}` : 'callback_response_invalid';
     } catch (error) {
+      code = `callback_${failureReason(error)}`;
       if (['callback_destination_denied', 'callback_origin_not_allowed'].includes(error.code)) code = 'callback_destination_denied';
       // No URL, body, secret, headers, provider response or raw exception in logs.
     }

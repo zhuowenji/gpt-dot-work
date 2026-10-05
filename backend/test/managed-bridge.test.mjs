@@ -428,3 +428,29 @@ test('manual owner reply clears a terminal failure immediately even before queue
   });
   assert.equal(f.chat.taskDto(f.chat.thread(a.id, a.principal)).execution_error, undefined);
 });
+
+
+test('signed subscription failures expose only a finite reason, never callback secrets or raw errors', async t => {
+  const f = await httpFixture(t), events = f.serverBridge.events;
+  events.enabled = true; events.allowedOrigins.add('https://callbacks.example.test');
+  const subscription = { name: 'task.created', arguments: { queue: 'website-chat' }, delivery: {
+    mode: 'webhook', url: 'https://callbacks.example.test/opaque-fixture-path?token=opaque-fixture-query',
+    secret: 'whsec_' + Buffer.from('fixed-offline-fixture-secret-0000').toString('base64'),
+  } };
+  const assertSafe = async reason => {
+    const response = await f.request('subscriptions/upsert', subscription);
+    assert.equal(response.status, 400);
+    assert.deepEqual(response.data, { error: { code: 'callback_verification_failed', reason,
+      message: `The callback challenge was not verified (${reason})` } });
+    for (const value of [subscription.delivery.url, subscription.delivery.secret, 'opaque-fixture-path', 'opaque-fixture-query', 'PRIVATE_RESPONSE', 'PRIVATE_HEADER', 'RAW_EXCEPTION']) assert(!JSON.stringify(response).includes(value));
+  };
+  events.resolver = () => { throw new Error(`RAW_EXCEPTION ${subscription.delivery.url} ${subscription.delivery.secret}`); };
+  await assertSafe('dns_error');
+  events.resolver = () => [{ address: '8.8.8.8', family: 4 }];
+  events.transport = () => ({ status: 503, body: 'PRIVATE_RESPONSE', headers: { secret: 'PRIVATE_HEADER' } });
+  await assertSafe('http_error');
+  events.transport = () => ({ status: 200, body: '{"challenge":"PRIVATE_RESPONSE"}' });
+  await assertSafe('challenge_mismatch');
+  events.transport = () => { throw Object.assign(new Error('RAW_EXCEPTION'), { reason: subscription.delivery.secret }); };
+  await assertSafe('transport_error');
+});
