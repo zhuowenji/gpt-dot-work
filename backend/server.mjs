@@ -8,7 +8,7 @@ import { WorkspaceStore, MAX_WORKSPACE_BYTES } from './workspace.mjs';
 import { VideoStore } from './videos.mjs';
 import { ChatIntake } from './chat.mjs';
 import { ManagedBridgeApi } from './managed-bridge.mjs';
-import { CALLBACK_FAILURE_REASONS } from './managed-bridge-events.mjs';
+import { CALLBACK_FAILURE_REASONS, CALLBACK_TRANSPORT_CODES, CALLBACK_TRANSPORT_PHASES, CALLBACK_HTTP_CLASSES } from './managed-bridge-events.mjs';
 import { pathToFileURL } from 'node:url';
 import { TaskStore, ApiError, TASK_STATES } from './store.mjs';
 import { readConfig } from './config.mjs';
@@ -216,6 +216,9 @@ export function createApiServer(store, config) {
         message: error instanceof ApiError ? error.message : 'The request could not be completed',
         ...(error instanceof ApiError && error.code === 'callback_origin_not_allowed' && typeof error.origin === 'string' ? { origin: error.origin } : {}),
         ...(error instanceof ApiError && error.code === 'callback_verification_failed' && CALLBACK_FAILURE_REASONS.includes(error.reason) ? { reason: error.reason } : {}),
+        ...(error instanceof ApiError && error.code === 'callback_verification_failed' && CALLBACK_TRANSPORT_CODES.includes(error.transport_code) ? { transport_code: error.transport_code } : {}),
+        ...(error instanceof ApiError && error.code === 'callback_verification_failed' && CALLBACK_TRANSPORT_PHASES.includes(error.transport_phase) ? { transport_phase: error.transport_phase } : {}),
+        ...(error instanceof ApiError && error.code === 'callback_verification_failed' && error.reason === 'http_error' && CALLBACK_HTTP_CLASSES.includes(error.callback_http_class) ? { callback_http_class: error.callback_http_class } : {}),
       } });
       else res.end();
     }

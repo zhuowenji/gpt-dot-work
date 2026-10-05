@@ -213,3 +213,18 @@ test('validated address snapshot is isolated from later resolver-object mutation
   await f.verify(); assert.equal(f.calls.length, 2);
   f.calls[1].options.lookup('callbacks.example.test', { all: true }, (_error, pinned) => assert.deepEqual(pinned, [PUBLIC[1]]));
 });
+
+
+test('verification preserves finite native code/phase and drops unrecognized raw code fields', async t => {
+  for (const [nativeCode, expectedCode, phase] of [['ECONNRESET', 'ECONNRESET', 'response'], ['ERR_INVALID_ARG_TYPE', 'ERR_INVALID_ARG_TYPE', 'connect'], ['RAW_SECRET_CODE', undefined, 'connect']]) {
+    const f = fixture(t, { behavior: call => {
+      if (phase === 'response') { call.socket.emit('connect'); call.socket.emit('secureConnect'); }
+      call.request.emit('error', rawError(nativeCode));
+    } });
+    await assert.rejects(f.verify(), error => {
+      safeFailure('transport_error')(error);
+      assert.equal(error.transport_code, expectedCode); assert.equal(error.transport_phase, phase);
+      return true;
+    });
+  }
+});

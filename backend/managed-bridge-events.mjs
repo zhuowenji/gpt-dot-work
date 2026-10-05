@@ -95,19 +95,40 @@ export const CALLBACK_FAILURE_REASONS = Object.freeze([
   'http_error', 'challenge_mismatch', 'response_invalid', 'request_timeout',
   'cancelled', 'transport_error',
 ]);
+export const CALLBACK_TRANSPORT_CODES = Object.freeze([
+  'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ENETUNREACH', 'EHOSTUNREACH',
+  'EADDRNOTAVAIL', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND', 'EPIPE', 'EPROTO', 'EACCES', 'EPERM',
+  'ERR_SOCKET_CLOSED', 'ERR_STREAM_DESTROYED', 'ERR_ACCESS_DENIED',
+  'ERR_INVALID_ARG_TYPE', 'ERR_INVALID_ARG_VALUE', 'ERR_INVALID_IP_ADDRESS', 'ERR_INVALID_PROTOCOL',
+  'ERR_HTTP_INVALID_HEADER_VALUE', 'ERR_INVALID_CHAR', 'ERR_HTTP_HEADERS_SENT',
+  'ERR_TLS_CERT_ALTNAME_INVALID', 'ERR_TLS_HANDSHAKE_TIMEOUT', 'ERR_SSL_WRONG_VERSION_NUMBER',
+  'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_REVOKED', 'CERT_SIGNATURE_FAILURE',
+  'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
+  'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'INVALID_CA', 'CERT_UNTRUSTED',
+  'HPE_INVALID_CONSTANT', 'HPE_INVALID_HEADER_TOKEN', 'HPE_INVALID_CONTENT_LENGTH',
+  'HPE_UNEXPECTED_CONTENT_LENGTH', 'HPE_HEADER_OVERFLOW', 'HPE_INVALID_CHUNK_SIZE',
+]);
+export const CALLBACK_TRANSPORT_PHASES = Object.freeze(['dns', 'connect', 'tls', 'response']);
+export const CALLBACK_HTTP_CLASSES = Object.freeze(['http_4xx', 'http_5xx', 'other']);
 class CallbackFailure extends Error {
-  constructor(reason, retryableConnection = false) {
+  constructor(reason, retryableConnection = false, code, phase) {
     super(`Callback failed: ${reason}`);
     this.reason = reason; this.retryableConnection = retryableConnection;
+    if (CALLBACK_TRANSPORT_CODES.includes(code)) this.transportCode = code;
+    if (CALLBACK_TRANSPORT_PHASES.includes(phase)) this.transportPhase = phase;
   }
 }
 function failureReason(error) {
   return error instanceof CallbackFailure && CALLBACK_FAILURE_REASONS.includes(error.reason) ? error.reason : 'transport_error';
 }
-function verificationFailed(reason) {
+function verificationFailed(reason, failure) {
   const safeReason = CALLBACK_FAILURE_REASONS.includes(reason) ? reason : 'transport_error';
   const error = new ApiError(400, 'callback_verification_failed', `The callback challenge was not verified (${safeReason})`);
   error.reason = safeReason;
+  if (failure instanceof CallbackFailure) {
+    if (CALLBACK_TRANSPORT_CODES.includes(failure.transportCode)) error.transport_code = failure.transportCode;
+    if (CALLBACK_TRANSPORT_PHASES.includes(failure.transportPhase)) error.transport_phase = failure.transportPhase;
+  }
   return error;
 }
 function cancelled(signal) {
@@ -120,17 +141,18 @@ function transportFailure(error, connected, tlsReady) {
   if (error instanceof CallbackFailure) return error;
   // Inspect codes only, never messages, causes, response bodies, or request data.
   const code = typeof error?.code === 'string' ? error.code : '';
+  const phase = !connected ? 'connect' : tlsReady ? 'response' : 'tls';
   if (code.startsWith('ERR_TLS_') || code.startsWith('ERR_SSL_') || [
     'CERT_HAS_EXPIRED', 'CERT_NOT_YET_VALID', 'CERT_REVOKED', 'CERT_SIGNATURE_FAILURE',
     'DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN', 'UNABLE_TO_VERIFY_LEAF_SIGNATURE',
     'UNABLE_TO_GET_ISSUER_CERT', 'UNABLE_TO_GET_ISSUER_CERT_LOCALLY', 'INVALID_CA', 'CERT_UNTRUSTED',
-  ].includes(code) || (connected && !tlsReady)) return new CallbackFailure('tls_error');
+  ].includes(code) || (connected && !tlsReady)) return new CallbackFailure('tls_error', false, code, phase);
   // Retry only a known failure before TCP connects, when no HTTP bytes can
   // have been transmitted. TLS, response, or ambiguous failures never fail over.
   if (!connected && ['ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH', 'EADDRNOTAVAIL', 'ECONNRESET', 'ETIMEDOUT'].includes(code)) {
-    return new CallbackFailure(code === 'ETIMEDOUT' ? 'connect_timeout' : 'connect_error', true);
+    return new CallbackFailure(code === 'ETIMEDOUT' ? 'connect_timeout' : 'connect_error', true, code, phase);
   }
-  return new CallbackFailure('transport_error');
+  return new CallbackFailure('transport_error', false, code, phase);
 }
 
 async function withDeadline(promise, milliseconds, signal, reason = 'request_timeout') {
@@ -351,7 +373,7 @@ export class ManagedBridgeEvents {
         answers = await withDeadline(Promise.resolve().then(() => this.resolver(target.hostname)), Math.min(EVENT_LIMITS.dnsTimeoutMs, remaining()), controller.signal, 'dns_timeout');
       } catch (error) {
         if (error instanceof CallbackFailure) throw error;
-        throw new CallbackFailure('dns_error');
+        throw new CallbackFailure('dns_error', false, error?.code, 'dns');
       }
       if (!Array.isArray(answers) || !answers.length || answers.length > 64 || answers.some(answer => !object(answer)
         || ![4, 6].includes(answer.family) || isIP(answer.address) !== answer.family || !isPublicAddress(answer.address))) throw blockedDestination();
@@ -379,7 +401,7 @@ export class ManagedBridgeEvents {
         } catch (error) {
           check();
           if (!(error instanceof CallbackFailure && error.retryableConnection) || index === addresses.length - 1) {
-            throw new CallbackFailure(failureReason(error));
+            throw error instanceof CallbackFailure ? error : new CallbackFailure('transport_error');
           }
         } finally {
           controller.signal.removeEventListener('abort', cancelAttempt);
@@ -414,9 +436,14 @@ export class ManagedBridgeEvents {
           eventId, body: JSON.stringify({ type: 'verification', challenge }), expiresAt: input.expiresAt, valid: current, readResponse: true });
       } catch (error) {
         if (error.code === 'callback_destination_denied' || error.code === 'callback_origin_not_allowed') throw error;
-        throw verificationFailed(failureReason(error));
+        throw verificationFailed(failureReason(error), error);
       }
-      if (!(httpStatus(response.status) >= 200 && httpStatus(response.status) < 300)) throw verificationFailed('http_error');
+      const status = httpStatus(response.status);
+      if (!(status >= 200 && status < 300)) {
+        const error = verificationFailed('http_error');
+        error.callback_http_class = status >= 400 && status < 500 ? 'http_4xx' : status >= 500 ? 'http_5xx' : 'other';
+        throw error;
+      }
       let echoed;
       try { echoed = JSON.parse(response.body)?.challenge; } catch { /* invalid response */ }
       const expected = Buffer.from(challenge), received = typeof echoed === 'string' ? Buffer.from(echoed) : Buffer.alloc(0);

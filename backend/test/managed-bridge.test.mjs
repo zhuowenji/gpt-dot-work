@@ -437,18 +437,24 @@ test('signed subscription failures expose only a finite reason, never callback s
     mode: 'webhook', url: 'https://callbacks.example.test/opaque-fixture-path?token=opaque-fixture-query',
     secret: 'whsec_' + Buffer.from('fixed-offline-fixture-secret-0000').toString('base64'),
   } };
-  const assertSafe = async reason => {
+  const assertSafe = async (reason, detail = {}) => {
     const response = await f.request('subscriptions/upsert', subscription);
     assert.equal(response.status, 400);
-    assert.deepEqual(response.data, { error: { code: 'callback_verification_failed', reason,
+    assert.deepEqual(response.data, { error: { code: 'callback_verification_failed', reason, ...detail,
       message: `The callback challenge was not verified (${reason})` } });
     for (const value of [subscription.delivery.url, subscription.delivery.secret, 'opaque-fixture-path', 'opaque-fixture-query', 'PRIVATE_RESPONSE', 'PRIVATE_HEADER', 'RAW_EXCEPTION']) assert(!JSON.stringify(response).includes(value));
   };
-  events.resolver = () => { throw new Error(`RAW_EXCEPTION ${subscription.delivery.url} ${subscription.delivery.secret}`); };
-  await assertSafe('dns_error');
+  events.resolver = () => { throw Object.assign(new Error(`RAW_EXCEPTION ${subscription.delivery.url} ${subscription.delivery.secret}`), { code: 'ENOTFOUND' }); };
+  await assertSafe('dns_error', { transport_code: 'ENOTFOUND', transport_phase: 'dns' });
+  events.resolver = () => { throw Object.assign(new Error('RAW_EXCEPTION'), { code: subscription.delivery.secret, transport_phase: subscription.delivery.url }); };
+  await assertSafe('dns_error', { transport_phase: 'dns' });
   events.resolver = () => [{ address: '8.8.8.8', family: 4 }];
   events.transport = () => ({ status: 503, body: 'PRIVATE_RESPONSE', headers: { secret: 'PRIVATE_HEADER' } });
-  await assertSafe('http_error');
+  await assertSafe('http_error', { callback_http_class: 'http_5xx' });
+  events.transport = () => ({ status: 403, body: 'PRIVATE_RESPONSE' });
+  await assertSafe('http_error', { callback_http_class: 'http_4xx' });
+  events.transport = () => ({ status: 302, body: 'PRIVATE_RESPONSE' });
+  await assertSafe('http_error', { callback_http_class: 'other' });
   events.transport = () => ({ status: 200, body: '{"challenge":"PRIVATE_RESPONSE"}' });
   await assertSafe('challenge_mismatch');
   events.transport = () => { throw Object.assign(new Error('RAW_EXCEPTION'), { reason: subscription.delivery.secret }); };
